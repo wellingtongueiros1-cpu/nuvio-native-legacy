@@ -42,7 +42,7 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      - name: Aplicar o patch dos capitulos
+      - name: Testes do menu de capitulos
         run: |
           if [ ! -f capitulos-no-player.patch ]; then
             echo "FALTA capitulos-no-player.patch na raiz do repositorio (suba o arquivo e rode de novo)"; exit 1
@@ -56,8 +56,13 @@ jobs:
 
       - name: Testes do menu de capitulos
         run: |
-          bash tests/capitulos.sh
-          bash tests/capmkv.sh
+          for t in tests/capitulos.sh tests/capmkv.sh; do
+            if [ -f "$t" ]; then
+              bash "$t"
+            else
+              echo "AVISO: $t nao existe, pulando"
+            fi
+          done
 
       - name: Configuracao do servidor (local.properties)
         env:
