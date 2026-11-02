@@ -1,0 +1,210 @@
+diff -ruN a/src/capmkv.c b/src/capmkv.c
+--- a/src/capmkv.c	2026-10-29 18:46:30.614222398 +0000
++++ b/src/capmkv.c	2026-10-29 18:46:30.615485899 +0000
+@@ -19,6 +19,10 @@
+ static pthread_mutex_t trava = PTHREAD_MUTEX_INITIALIZER;
+ static unsigned ger;                       // reproducao corrente
+ static double nomeado, ultimo;             // regra da LG: nome > ultimo no ultimo quarto
++// Capitulos da reproducao corrente, para o player desenhar as marcas na barra e
++// pular de um a outro. Sob `trava`, zerado em capmkv_zerar.
++static MkvCap atuais[MKV_MAX_CAPS];
++static int nAtuais;
+ 
+ // URL NO HEAP, do tamanho dela, e nao char[512]: o player guarda ate 4096
+ // (video_tpk.c/video_android.c urlAtual) e link assinado de debrid/CDN passa
+@@ -101,6 +105,16 @@
+   if (checa && g != ger) { pthread_mutex_unlock(&trava); return 0; }
+   nomeado = a = n > 0 ? mkv_creditos_nomeados(caps, n) : 0.0;
+   ultimo = b = n > 0 ? mkv_creditos_ultimo(caps, n) : 0.0;
++  nAtuais = n > 0 ? (n < MKV_MAX_CAPS ? n : MKV_MAX_CAPS) : 0;
++  if (nAtuais > 0) {
++    int i, j;
++    memcpy(atuais, caps, (size_t)nAtuais * sizeof *caps);
++    for (i = 1; i < nAtuais; i++) {   // em ordem de inicio, venha o arquivo como vier
++      MkvCap c = atuais[i];
++      for (j = i - 1; j >= 0 && atuais[j].inicio > c.inicio; j--) atuais[j + 1] = atuais[j];
++      atuais[j + 1] = c;
++    }
++  }
+   if (k > 0) intro_definir_capitulos(v, k);
+   pthread_mutex_unlock(&trava);
+   if (n > 0) {
+@@ -112,6 +126,16 @@
+ 
+ void capmkv_aplicar(const MkvCap *caps, int n) { publicar(caps, n, 0, 0); }
+ 
++int capmkv_lista(MkvCap *out, int max) {
++  int n;
++  if (!out || max < 1) return 0;
++  pthread_mutex_lock(&trava);
++  n = nAtuais < max ? nAtuais : max;
++  if (n > 0) memcpy(out, atuais, (size_t)n * sizeof *out);
++  pthread_mutex_unlock(&trava);
++  return n;
++}
++
+ double capmkv_creditos(double dur) {
+   double a, b;
+   pthread_mutex_lock(&trava); a = nomeado; b = ultimo; pthread_mutex_unlock(&trava);
+@@ -181,6 +205,7 @@
+ void capmkv_zerar(void) {
+   pthread_mutex_lock(&trava);
+   ger++; nomeado = ultimo = 0.0;
++  nAtuais = 0;
+   intro_definir_capitulos(NULL, 0);   // sob a trava: nenhum fio publica no meio
+   pthread_mutex_unlock(&trava);
+ }
+diff -ruN a/src/capmkv.h b/src/capmkv.h
+--- a/src/capmkv.h	2026-10-29 18:46:30.619251677 +0000
++++ b/src/capmkv.h	2026-10-29 18:46:30.620498459 +0000
+@@ -31,6 +31,11 @@
+ // Entrega capitulos ja lidos (LG/.wgt): guarda para capmkv_creditos e alimenta
+ // o modulo de intro (abertura/creditos/previa).
+ void capmkv_aplicar(const MkvCap *caps, int n);
++// Capitulos da reproducao corrente, em ordem de `inicio` (segundos). Copia ate
++// `max` em `out` e devolve quantos (0 = o arquivo nao traz ou ainda nao foram
++// lidos). Nao bloqueia: so copia o que o fio lateral ja publicou. Serve a barra
++// de progresso (marcas) e ao salto de capitulo do player.
++int capmkv_lista(MkvCap *out, int max);
+ // So a regra, sem estado: capitulos -> trechos de intro.h. Abertura ("Opening"/
+ // "OP"), creditos nomeados (ate a previa, se houver) e previa final ("Preview"/
+ // "Next Episode"). Devolve quantos preencheu em `out`.
+diff -ruN a/src/player.c b/src/player.c
+--- a/src/player.c	2026-10-29 18:46:30.624461557 +0000
++++ b/src/player.c	2026-10-29 18:46:30.625682670 +0000
+@@ -96,6 +96,7 @@
+ #include "mkvass.h"
+ #include "relogio.h"
+ #include "intro.h"
++#include "capmkv.h"
+ #include "proximo.h"
+ #include "creditosauto.h"
+ #include "credfonte.h"
+@@ -450,6 +451,24 @@
+   if (alvo > posSeg) assistidoSeg += alvo - posSeg;
+   posSeg = (float)alvo;
+ }
++// PULO DE CAPITULO (CH+/CH-, PgUp/PgDn): os capitulos que o arquivo traz
++// (capmkv.h). Para a frente vai ao proximo inicio; para tras volta ao inicio do
++// capitulo em que se esta, e so se ja se esta nos primeiros 3 s dele vai ao
++// anterior (o gesto do "faixa anterior" de qualquer player). Devolve o alvo em
++// segundos, ou -1 quando o arquivo nao tem capitulos para onde ir.
++#define PLR_CAP_VOLTA_S 3.0
++static double capituloAlvo(int dir) {
++  MkvCap c[MKV_MAX_CAPS];
++  int n = capmkv_lista(c, MKV_MAX_CAPS), i;
++  double p = posSeg;
++  if (n < 1) return -1.0;
++  if (dir > 0) {
++    for (i = 0; i < n; i++) if (c[i].inicio > p + 0.5) return c[i].inicio;
++    return -1.0;                                  // ja no ultimo capitulo
++  }
++  for (i = n - 1; i >= 0; i--) if (c[i].inicio < p - PLR_CAP_VOLTA_S) return c[i].inicio;
++  return 0.0;                                     // antes do 1o: volta ao comeco
++}
+ 
+ static char linhaEp[220];          // "T1, E1 · <sinopse curta>", montada na abertura
+ 
+@@ -4217,6 +4236,22 @@
+     return;
+   }
+ 
++  // CH+/CH- (e PgUp/PgDn) no filme/serie: proximo/anterior CAPITULO do arquivo.
++  // Sem capitulos nada muda: a tecla segue o caminho de antes.
++  { int sc = e->key.keysym.scancode;
++    int prox = sc == NV_SCANCODE_CH_UP   || k == SDLK_PAGEUP;
++    int ant  = sc == NV_SCANCODE_CH_DOWN || k == SDLK_PAGEDOWN;
++    if ((prox || ant) && comVideo && !e->key.repeat) {
++      double alvo = capituloAlvo(prox ? 1 : -1);
++      if (alvo >= 0.0) {
++        // Busca do dono, nao o pulo oficial: nao credita como assistido (#205).
++        { double de = posSeg; posSeg = (float)alvo; recuarAutomatico(de, alvo); }
++        buscarUsuario(alvo);
++        acordar();
++        return;
++      }
++    } }
++
+   if (!visivel) {
+     // Tudo que acorda daqui acorda INTEIRO; so a busca abaixo volta a pedir
+     // so a barra. Sem isto um soBarra de uma busca antiga, ja apagada, ficava
+@@ -6900,14 +6935,22 @@
+   { float bufFrac = (!ehCanal() && duracaoSeg > 0.0f) ? anim_clamp(video_buffer_fim() / duracaoSeg, 0.0f, 1.0f) : 0.0f;
+     // OS CORTES DO TheIntroDB (abertura, resumo, creditos) que o player ja
+     // tem: onde cada trecho comeca e acaba, discretos sobre o trilho.
+-    float caps[16];
++    // Se o arquivo traz CAPITULOS, as marcas sao os inicios deles (o 1o, em 0, nao
++    // aparece); sem capitulos, ficam os cortes do TheIntroDB como sempre foram.
++    float caps[MKV_MAX_CAPS + 16];
+     int nCaps = 0;
+     if (!ehCanal() && duracaoSeg > 0.0f) {
+-      IntroTrecho tr[8];
+-      int nt = intro_trechos(tr, 8), i;
+-      for (i = 0; i < nt && nCaps < 15; i++) {
+-        caps[nCaps++] = (float)(tr[i].inicio / duracaoSeg);
+-        if (tr[i].fim > 0.0) caps[nCaps++] = (float)(tr[i].fim / duracaoSeg);
++      MkvCap lc[MKV_MAX_CAPS];
++      int nl = capmkv_lista(lc, MKV_MAX_CAPS), i;
++      if (nl > 0) {
++        for (i = 0; i < nl; i++) caps[nCaps++] = (float)(lc[i].inicio / duracaoSeg);
++      } else {
++        IntroTrecho tr[8];
++        int nt = intro_trechos(tr, 8);
++        for (i = 0; i < nt && nCaps < 15; i++) {
++          caps[nCaps++] = (float)(tr[i].inicio / duracaoSeg);
++          if (tr[i].fim > 0.0) caps[nCaps++] = (float)(tr[i].fim / duracaoSeg);
++        }
+       }
+       for (i = 0; i < nCaps; i++) if (caps[i] <= 0.0f || caps[i] >= 1.0f) caps[i--] = caps[--nCaps];
+     }
+diff -ruN a/src/video.c b/src/video.c
+--- a/src/video.c	2026-10-29 18:46:30.629853568 +0000
++++ b/src/video.c	2026-10-29 18:46:30.631049788 +0000
+@@ -2356,6 +2356,7 @@
+   // capitulos herdaria os creditos do filme de antes — e o painel subiria numa
+   // hora sem relacao nenhuma com o que esta tocando.
+   creditosNomeado = creditosUltimo = 0.0;
++  capmkv_zerar();   // a lista de capitulos (marcas da barra, salto) tambem e do titulo anterior
+   snprintf(urlAtual, sizeof urlAtual, "%s", url ? url : "");
+   return tocarInterno(url, 1);
+ }
+diff -ruN a/src/video_tizen.c b/src/video_tizen.c
+--- a/src/video_tizen.c	2026-10-29 18:46:30.635102431 +0000
++++ b/src/video_tizen.c	2026-10-29 18:46:30.636370216 +0000
+@@ -946,6 +946,7 @@
+   // Titulo novo: o marcador do anterior nao vale. Sem isto um filme sem
+   // capitulos herdaria os creditos do filme de antes.
+   creditosNomeado = creditosUltimo = 0.0;
++  capmkv_zerar();   // a lista de capitulos (marcas da barra, salto) tambem e do titulo anterior
+   roiResetTentativas = 0;
+   roiAtivo = 1;   // o recorte do titulo anterior pode ter ficado no player
+   snprintf(urlAtual, sizeof urlAtual, "%s", url);
+diff -ruN a/tests/capmkv.c b/tests/capmkv.c
+--- a/tests/capmkv.c	2026-10-29 18:46:30.640631560 +0000
++++ b/tests/capmkv.c	2026-10-29 18:46:30.641744173 +0000
+@@ -199,6 +199,13 @@
+   for (int i = 0; i < 300 && !nGravado; i++) usleep(10000);
+   usleep(50000);
+   ok(nGravado == 3, "fio entregou os trechos ao modulo de intro");
++  { MkvCap l[MKV_MAX_CAPS];
++    int nl = capmkv_lista(l, MKV_MAX_CAPS), ord = 1;
++    for (int i = 1; i < nl; i++) if (l[i].inicio < l[i - 1].inicio) ord = 0;
++    ok(nl == 5, "capmkv_lista devolve os 5 capitulos publicados");
++    ok(ord && perto(l[3].inicio, 1260) && !strcmp(l[3].nome, "Ending"), "lista em ordem, com inicio e nome");
++    ok(capmkv_lista(l, 2) == 2, "max menor que n: so copia max");
++    ok(capmkv_lista(NULL, 5) == 0 && capmkv_lista(l, 0) == 0, "argumento invalido: 0, sem tocar em nada"); }
+   antes = pedidos;
+   capmkv_iniciar("https://x.test/d.mkv");
+   usleep(100000);
+@@ -225,6 +232,11 @@
+   capmkv_teste_antes_de_publicar = NULL;
+   ok(capmkv_creditos(1400) == 0.0, "B sem creditos vindos de A");
+   ok(nGravado == 0, "B sem trechos de intro vindos de A");
++  { MkvCap l[MKV_MAX_CAPS];
++    ok(capmkv_lista(l, MKV_MAX_CAPS) == 0, "B sem a lista de capitulos de A"); }
++  capmkv_zerar();
++  { MkvCap l[MKV_MAX_CAPS];
++    ok(capmkv_lista(l, MKV_MAX_CAPS) == 0, "capmkv_zerar esvazia a lista"); }
+ 
+   printf("%s\n", falhas ? "FALHOU" : "capmkv: ok");
+   return falhas ? 1 : 0;
