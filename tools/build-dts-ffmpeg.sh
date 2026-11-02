@@ -46,7 +46,15 @@ if [ "$TARGET" = tpk ]; then
 else
   CC=${CC:-arm-webos-linux-gnueabi-gcc}
   archive="$BUILD/ffmpeg-$VERSION.tar.xz"
-  [ -f "$archive" ] || curl -fsSL "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$archive"
+      if [ ! -f "$archive" ]; then
+      for i in 1 2 3 4 5 6; do
+        curl -fsSL --tlsv1.2 --connect-timeout 20 \
+          "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$archive" && break
+        echo "download falhou (tentativa $i), aguardando..." >&2
+        rm -f "$archive"
+        sleep $((i * 10))
+      done
+    fi
   printf '%s  %s\n' "$SHA256" "$archive" | sha256sum -c -
   tar -xf "$archive" -C "$BUILD"
   SRC=.
