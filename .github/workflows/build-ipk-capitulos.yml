@@ -54,13 +54,13 @@ jobs:
           fi
           patch -p1 < capitulos-no-player.patch
 
-               - name: Aplicar o icone dos capitulos
-           run: |
-             if [ ! -f capitulos-icone.patch ]; then
-               echo "FALTA capitulos-icone.patch na raiz do repositorio"; exit 1
-             fi
-             patch -p1 --dry-run < capitulos-icone.patch
-             patch -p1 < capitulos-icone.patch
+      - name: Aplicar o icone dos capitulos
+        run: |
+          if [ ! -f capitulos-icone.patch ]; then
+            echo "FALTA capitulos-icone.patch na raiz do repositorio"; exit 1
+          fi
+          patch -p1 --dry-run < capitulos-icone.patch
+          patch -p1 < capitulos-icone.patch
 
       - name: Configuracao do servidor (local.properties)
         env:
