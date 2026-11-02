@@ -279,6 +279,7 @@ static int    posVisSolto;   // 1 = ainda deslizando ate o alvo
 #define PLR_BUSCA_MOLA 18.0f // rad/s: assenta em ~300 ms depois da ultima tecla
 
 static int   aberto = 0, saindo = 0, pediuSair = 0;
+static int capsAberto = 0;
 static int   idx = 0;
 // UI-thread ownership of this exact player source/session.
 static unsigned fonteAcaoGeracao;
