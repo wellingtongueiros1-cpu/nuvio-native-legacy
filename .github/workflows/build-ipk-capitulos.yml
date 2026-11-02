@@ -55,14 +55,13 @@ jobs:
           patch -p1 < capitulos-no-player.patch
 
       - name: Testes do menu de capitulos
-        run: |
-          for t in tests/capitulos.sh tests/capmkv.sh; do
-            if [ -f "$t" ]; then
-              bash "$t"
-            else
-              echo "AVISO: $t nao existe, pulando"
-            fi
-          done
+        run: Aplicar o icone dos capitulos
+           run: |
+             if [ ! -f capitulos-icone.patch ]; then
+               echo "FALTA capitulos-icone.patch na raiz do repositorio"; exit 1
+             fi
+             patch -p1 --dry-run < capitulos-icone.patch
+             patch -p1 < capitulos-icone.patch
 
       - name: Configuracao do servidor (local.properties)
         env:
