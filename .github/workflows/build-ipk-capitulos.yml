@@ -55,8 +55,7 @@ jobs:
           patch -p1 < capitulos-no-player.patch
 
       - name: Testes do menu de capitulos
-        run: Aplicar o icone dos capitulos
-           run: |
+        run: 
              if [ ! -f capitulos-icone.patch ]; then
                echo "FALTA capitulos-icone.patch na raiz do repositorio"; exit 1
              fi
