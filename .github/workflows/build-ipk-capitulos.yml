@@ -1,1 +1,112 @@
+# Compila o Nuvio Legacy (LG webOS) com o menu de capitulos e entrega o .ipk
+# como "artifact" para baixar. Roda so quando voce manda (aba Actions > Run workflow).
+#
+# Antes: (1) subir capitulos-no-player.patch na RAIZ do repositorio;
+#        (2) criar os 3 secrets NUVIO_SUPABASE_URL, NUVIO_SUPABASE_ANON_KEY e
+#            TV_LOGIN_WEB_BASE_URL (Settings > Secrets and variables > Actions).
+name: Build IPK com capitulos
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag, branch ou commit equivalente ao codigo 2.0.8 (vazio = o padrao do repositorio)"
+        required: false
+        default: ""
+      dv7:
+        description: "Conversao Dolby Vision 7 (1 = ligada; 0 se o build falhar nessa parte)"
+        required: false
+        default: "1"
+permissions:
+  contents: read
+jobs:
+  ipk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      NUVIO_BUILD_PLATFORM: linux/amd64
+      NUVIO_CONTAINER_RUNTIME: docker
+      NUVIO_P2P_MOTOR: none          # sem o motor torrent embutido (ver aviso no final do build)
+      NUVIO_BUILD_JOBS: "4"
+      NUVIO_DV7: ${{ inputs.dv7 }}
+      RUSTUP_HOME: /home/runner/.rustup
+      CARGO_HOME: /home/runner/.cargo
+    steps:
+      - name: Liberar espaco em disco (o SDK da LG e grande)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af || true
+          df -h /
 
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Aplicar o patch dos capitulos
+        run: |
+          if [ ! -f capitulos-no-player.patch ]; then
+            echo "FALTA capitulos-no-player.patch na raiz do repositorio (suba o arquivo e rode de novo)"; exit 1
+          fi
+          if ! patch -p1 --dry-run < capitulos-no-player.patch > /tmp/dry.txt 2>&1; then
+            cat /tmp/dry.txt
+            echo "O patch nao aplica neste codigo. Rode de novo informando em 'ref' a tag/commit da versao 2.0.8."
+            exit 1
+          fi
+          patch -p1 < capitulos-no-player.patch
+
+      - name: Testes do menu de capitulos
+        run: |
+          bash tests/capitulos.sh
+          bash tests/capmkv.sh
+
+      - name: Configuracao do servidor (local.properties)
+        env:
+          S_URL: ${{ secrets.NUVIO_SUPABASE_URL }}
+          S_KEY: ${{ secrets.NUVIO_SUPABASE_ANON_KEY }}
+          S_TVB: ${{ secrets.TV_LOGIN_WEB_BASE_URL }}
+        run: |
+          for v in S_URL S_KEY S_TVB; do
+            [ -n "${!v}" ] || { echo "Secret ausente: $v (veja o cabecalho deste arquivo)"; exit 1; }
+          done
+          {
+            echo "NUVIO_SUPABASE_URL=$S_URL"
+            echo "NUVIO_SUPABASE_ANON_KEY=$S_KEY"
+            echo "TV_LOGIN_WEB_BASE_URL=$S_TVB"
+          } > local.properties
+          chmod 600 local.properties
+          bash tools/env.sh --require-core > /dev/null
+
+      - name: Rust 1.88 (nucleo MKV e conversor DV7)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
+          sh /tmp/rustup.sh -y --profile minimal --default-toolchain 1.88.0
+          "$CARGO_HOME/bin/rustup" target add armv7-unknown-linux-gnueabi
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: ares-package (empacotador .ipk da LG)
+        run: |
+          sudo npm install -g @webos-tools/cli
+          echo "NUVIO_ARES_PACKAGE=$(command -v ares-package)" >> "$GITHUB_ENV"
+
+      - name: Imagem do compilador ARM da LG (demora)
+        run: |
+          docker build --platform linux/amd64 \
+            --build-arg SDK_URL=https://github.com/openlgtv/buildroot-nc4/releases/download/webos-a38c582/arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz \
+            -t nuvio-webos-sdk tools/
+
+      - name: Compilar e empacotar o .ipk (variante high-cache)
+        run: bash tools/arm.sh --high-cache --ipk --build
+
+      - name: Localizar o .ipk
+        run: |
+          find . -name '*.ipk' -not -path './node_modules/*' -print | tee /tmp/ipks.txt
+          [ -s /tmp/ipks.txt ] || { echo "Nenhum .ipk foi gerado"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-legacy-ipk-capitulos
+          path: |
+            **/*.ipk
+            !node_modules/**
+          retention-days: 14
+          if-no-files-found: error
