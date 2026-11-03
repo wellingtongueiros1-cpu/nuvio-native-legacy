@@ -1,7 +1,8 @@
 # Compila o Nuvio Legacy (LG webOS) com o menu de capitulos e entrega o .ipk
 # como "artifact" para baixar. Roda so quando voce manda (aba Actions > Run workflow).
 #
-# Antes: (1) subir capitulos-no-player.patch na RAIZ do repositorio;
+# Antes: (1) subir na RAIZ do repositorio os 3 patches, que sao aplicados NESTA ORDEM:
+#            capitulos-no-player.patch, capitulos-icone.patch, capitulos-painel-lateral.patch;
 #        (2) criar os 3 secrets NUVIO_SUPABASE_URL, NUVIO_SUPABASE_ANON_KEY e
 #            TV_LOGIN_WEB_BASE_URL (Settings > Secrets and variables > Actions).
 name: Build IPK com capitulos
@@ -61,6 +62,14 @@ jobs:
           fi
           patch -p1 --dry-run < capitulos-icone.patch
           patch -p1 < capitulos-icone.patch
+
+      - name: Aplicar o painel lateral dos capitulos
+        run: |
+          if [ ! -f capitulos-painel-lateral.patch ]; then
+            echo "FALTA capitulos-painel-lateral.patch na raiz do repositorio"; exit 1
+          fi
+          patch -p1 --dry-run < capitulos-painel-lateral.patch
+          patch -p1 < capitulos-painel-lateral.patch
 
       - name: Configuracao do servidor (local.properties)
         env:
