@@ -91,6 +91,11 @@ jobs:
           "$SDKM" "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
           echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
 
+      - name: ffmpeg (o script de arte converte as imagens webp com ele)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+
       - name: Cache das dependencias nativas
         uses: actions/cache@v4
         with:
