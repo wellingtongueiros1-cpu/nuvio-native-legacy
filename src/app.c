@@ -7137,6 +7137,8 @@ static void desenharTelas(Uint32 agora) {
   if (guia_overlay_aberta()) { ponteiro_camada(); guia_desenhar(agora); }
   CAMADA_SE(episodios_aberto());
   episodios_desenhar();
+  CAMADA_SE(player_aberto() && player_capitulos_visivel());
+  if (player_aberto()) player_capitulos_desenhar(agora);
   CAMADA_SE(stream_folha_aberta());
   stream_folha_desenhar(agora);
   CAMADA_SE(faixas_aberta());

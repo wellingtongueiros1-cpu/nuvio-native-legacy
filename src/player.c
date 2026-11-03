@@ -106,6 +106,7 @@ extern int trakt_scrobble_alvo(int, const TraktScrobbleAlvo *, double, double,
 #include "mkvass.h"
 #include "relogio.h"
 #include "intro.h"
+#include "capmkv.h"
 #include "proximo.h"
 #include "creditosauto.h"
 #include "credfonte.h"
@@ -234,7 +235,7 @@ extern int trakt_scrobble_alvo(int, const TraktScrobbleAlvo *, double, double,
 // IDs estaveis: a ordem visual e de navegacao vem de transporteAcoes.
 // Na serie, Anterior/Proximo ficam ao lado do Play; o restante conserva a ordem.
 enum { PLR_PLAY, PLR_CC, PLR_AUDIO, PLR_ASPECTO,
-       PLR_FONTES, PLR_EPISODIOS, PLR_PROXIMO, PLR_REINICIAR, PLR_NESTE, PLR_NBTNS };
+       PLR_FONTES, PLR_EPISODIOS, PLR_PROXIMO, PLR_REINICIAR, PLR_NESTE, PLR_CAPITULOS, PLR_NBTNS };
 
 // Avanco em curso: enquanto vale, posSeg e do DONO e nao do pipeline.
 static int    scrubbing, scrubPassos, scrubTocava, scrubDir, scrubToque;
@@ -280,6 +281,7 @@ static int    posVisSolto;   // 1 = ainda deslizando ate o alvo
 
 static int   aberto = 0, saindo = 0, pediuSair = 0;
 static int capsAberto = 0;
+static float capsAnim = 0.0f;   // entrada/saida do painel de capitulos (mais abaixo)
 static int   idx = 0;
 // UI-thread ownership of this exact player source/session.
 static unsigned fonteAcaoGeracao;
@@ -461,6 +463,24 @@ static double puloDestino(double fim) { return fim > 0.0 ? fim + .25 : duracaoSe
 static void pularTrecho(double alvo) {
   if (alvo > posSeg) assistidoSeg += alvo - posSeg;
   posSeg = (float)alvo;
+}
+// PULO DE CAPITULO (CH+/CH-, PgUp/PgDn): os capitulos que o arquivo traz
+// (capmkv.h). Para a frente vai ao proximo inicio; para tras volta ao inicio do
+// capitulo em que se esta, e so se ja se esta nos primeiros 3 s dele vai ao
+// anterior (o gesto do "faixa anterior" de qualquer player). Devolve o alvo em
+// segundos, ou -1 quando o arquivo nao tem capitulos para onde ir.
+#define PLR_CAP_VOLTA_S 3.0
+static double capituloAlvo(int dir) {
+  MkvCap c[MKV_MAX_CAPS];
+  int n = capmkv_lista(c, MKV_MAX_CAPS), i;
+  double p = posSeg;
+  if (n < 1) return -1.0;
+  if (dir > 0) {
+    for (i = 0; i < n; i++) if (c[i].inicio > p + 0.5) return c[i].inicio;
+    return -1.0;                                  // ja no ultimo capitulo
+  }
+  for (i = n - 1; i >= 0; i--) if (c[i].inicio < p - PLR_CAP_VOLTA_S) return c[i].inicio;
+  return 0.0;                                     // antes do 1o: volta ao comeco
 }
 
 static char linhaEp[220];          // "T1, E1 · <sinopse curta>", montada na abertura
@@ -1887,6 +1907,7 @@ void player_abrir(int indiceCatalogo, const char *url) {
   // Titulo novo: um avanco em curso do anterior mandaria a posicao velha ao
   // pipeline novo assim que o silencio vencesse.
   scrubbing = 0; scrubPassos = 0; scrubTocava = 0; scrubDir = 0; scrubToque = 0; scrubInicio = 0.0;
+  capsAberto = 0; capsAnim = 0.0f;   // o painel de capitulos e do titulo anterior
   posVis = 0.0f; posVisV = 0.0f; posVisSolto = 0;
 #ifdef NV_TPK
   seekgesto_zerar(&gesto);
@@ -3352,6 +3373,170 @@ static void corpoNeste(GfxRect r, float a, void *u) {
   }
 }
 
+// CAPITULOS DO ARQUIVO (capmkv.h): um botao na fileira, so quando o arquivo traz
+// capitulos, que abre a LISTA na ilha. CIMA/BAIXO escolhem, OK vai ao capitulo
+// (busca do dono: nao credita como assistido, como o CH+/CH-), Voltar fecha.
+// >>> CAPS-PAINEL
+// PAINEL LATERAL DE CAPITULOS: desenhado na direita da tela (app.c chama
+// player_capitulos_desenhar depois do painel de episodios). Cada linha traz o
+// numero, o nome, onde o capitulo comeca e quanto dura; o capitulo em que o
+// filme esta ganha uma barra de progresso. Entra deslizando da borda.
+#define CAPS_LINHA_H   76.0f
+#define CAPS_PAINEL_W  560.0f
+#define CAPS_MARGEM    36.0f
+#define CAPS_CABECA    112.0f
+static int capsAberto, capsSel, capsTopo, capsN, capsVis = 8;
+static float capsAnim;                 // 0..1: a entrada e a saida do painel
+static MkvCap capsLista[MKV_MAX_CAPS];
+static int temCapitulos(void) {
+  MkvCap um[1];
+  return !ehCanal() && capmkv_lista(um, 1) > 0;
+}
+// Quantas linhas cabem na altura da tela (3 a 14).
+static int capsLinhasVisiveis(void) {
+  float h = (float)NV_TELA_H - 2.0f * CAPS_MARGEM - CAPS_CABECA - 24.0f;
+  int v = (int)(h / CAPS_LINHA_H);
+  if (v < 3) v = 3;
+  if (v > 14) v = 14;
+  return v;
+}
+static void capsAjustar(void) {
+  int max;
+  if (capsSel > capsN - 1) capsSel = capsN - 1;
+  if (capsSel < 0) capsSel = 0;
+  if (capsSel < capsTopo) capsTopo = capsSel;
+  if (capsSel > capsTopo + capsVis - 1) capsTopo = capsSel - (capsVis - 1);
+  max = capsN - capsVis;
+  if (max < 0) max = 0;
+  if (capsTopo > max) capsTopo = max;
+  if (capsTopo < 0) capsTopo = 0;
+}
+// O capitulo em que o filme esta agora.
+static int capsAtual(void) {
+  int i, at = 0;
+  for (i = 0; i < capsN; i++) if (capsLista[i].inicio <= (double)posSeg + 0.5) at = i;
+  return at;
+}
+// Abre ja no capitulo em que o filme esta, com ele mais ou menos no meio.
+static void capsAbrir(void) {
+  capsN = capmkv_lista(capsLista, MKV_MAX_CAPS);
+  if (capsN < 1) return;
+  capsVis = capsLinhasVisiveis();
+  capsSel = capsAtual();
+  capsTopo = capsSel - capsVis / 2;
+  capsAjustar();
+  capsAberto = 1;
+}
+// Ponteiro (Magic Remote, mouse, toque): passar sobre a linha a seleciona e o
+// clique age como OK (vai ao capitulo); clicar fora fecha o painel.
+static void ponteiroCapsLinha(int k, int b) {
+  (void)b;
+  if (k >= 0 && k < capsN) { capsSel = k; capsAjustar(); }
+}
+static void ponteiroCapsFora(int a, int b) { (void)a; (void)b; capsAberto = 0; }
+int player_capitulos_visivel(void) { return capsAnim > 0.004f && capsN > 0; }
+void player_capitulos_desenhar(Uint32 agora) {
+  float e, a, pw, ph, px, py, x, w, y, ar, ag, ab;
+  int atual, vis, i, tinta, ptr;
+  char tit[40];
+  TxtLinha lt, lc;
+  (void)agora;
+  if (!player_capitulos_visivel()) return;
+  e = capsAnim > 1.0f ? 1.0f : capsAnim;
+  a = e;
+  e = 1.0f - (1.0f - e) * (1.0f - e) * (1.0f - e);   // desliza e assenta
+  pw = CAPS_PAINEL_W;
+  ph = (float)NV_TELA_H - 2.0f * CAPS_MARGEM;
+  px = (float)NV_TELA_W - CAPS_MARGEM - pw + (1.0f - e) * (pw + CAPS_MARGEM);
+  py = CAPS_MARGEM;
+  atual = capsAtual();
+  vis = capsN < capsVis ? capsN : capsVis;
+  corFocoPlayer(&ar, &ag, &ab);
+
+  // Alvos do ponteiro so com o painel assentado (nao enquanto desliza) e aberto.
+  ptr = capsAberto && a > 0.5f && ponteiro_ativo();
+  if (ptr) {
+    ponteiro_alvo(0, 0, NV_TELA_W, NV_TELA_H, NULL, ponteiroCapsFora, 0, 0);
+    ponteiro_alvo(px, py, pw, ph, NULL, NULL, 0, 0);   // o painel nao deixa o clique passar
+  }
+  gfx_cor((GfxRect){ px, py, pw, ph }, 0.03f, 0.075f, 0.08f, 0.095f, 0.94f * a);
+  x = px + 28.0f; w = pw - 56.0f;
+
+  // cabecalho: o titulo e "n / total"
+  lt = txt_linha(TXT_ILHA_PERGUNTA, i18n("Capítulos"), 243, 243, 243, 255);
+  snprintf(tit, sizeof tit, "%d / %d", atual + 1, capsN);
+  lc = txt_linha(TXT_ILHA_TEXTO, tit, 243, 243, 243, 150);
+  txt_desenhar_alpha(lt, x, py + 28.0f, a);
+  txt_desenhar_alpha(lc, x + w - (float)lc.w, py + 28.0f + ((float)lt.h - (float)lc.h) * 0.5f, a);
+  gfx_cor((GfxRect){ x, py + CAPS_CABECA - 14.0f, w, 1.0f }, 0.0f, 1, 1, 1, 0.10f * a);
+
+  y = py + CAPS_CABECA;
+  for (i = 0; i < vis; i++) {
+    int k = capsTopo + i, sel, cur;
+    float ini, fimc, durc, lx;
+    char nome[112], hora[24], dur[24], sub[64];
+    TxtLinha ln, ls, lnum;
+    GfxRect row = { x - 12.0f, y, w + 24.0f - 10.0f, CAPS_LINHA_H - 6.0f };
+    if (k >= capsN) break;
+    sel = k == capsSel;
+    cur = k == atual;
+    tinta = sel ? plrui_tinta() : 243;
+    ini = (float)capsLista[k].inicio;
+    fimc = (k + 1 < capsN) ? (float)capsLista[k + 1].inicio : duracaoSeg;
+    durc = fimc - ini;
+    if (capsLista[k].nome[0]) snprintf(nome, sizeof nome, "%s", capsLista[k].nome);
+    else snprintf(nome, sizeof nome, i18n("Cap\xc3\xadtulo %d"), k + 1);
+    plrui_tempo(hora, sizeof hora, capsLista[k].inicio);
+    if (durc > 0.5f) {
+      plrui_tempo(dur, sizeof dur, (double)durc);
+      snprintf(sub, sizeof sub, "%s  \xc2\xb7  %s", hora, dur);
+    } else snprintf(sub, sizeof sub, "%s", hora);
+
+    if (ptr) ponteiro_alvo(row.x, row.y, row.w, row.h, ponteiroCapsLinha, NULL, k, 0);
+    if (sel) gfx_cor(row, 0.22f, ar, ag, ab, 0.92f * a);
+    else if (cur) gfx_cor(row, 0.22f, 1, 1, 1, 0.07f * a);
+
+    // o numero numa bolinha (cheia de acento no capitulo atual)
+    { GfxRect b = { x + 2.0f, y + (CAPS_LINHA_H - 6.0f - 40.0f) * 0.5f, 40.0f, 40.0f };
+      char num[12];
+      if (!sel) {
+        if (cur) gfx_cor(b, 0.5f, ar, ag, ab, 0.95f * a);
+        else gfx_cor(b, 0.5f, 1, 1, 1, 0.12f * a);
+      } else gfx_cor(b, 0.5f, 0, 0, 0, 0.16f * a);
+      snprintf(num, sizeof num, "%d", k + 1);
+      lnum = txt_linha(TXT_ILHA_TEXTO, num, tinta, tinta, tinta, 255);
+      txt_desenhar_alpha(lnum, b.x + (b.w - (float)lnum.w) * 0.5f, b.y + (b.h - (float)lnum.h) * 0.5f, a);
+    }
+
+    lx = x + 58.0f;
+    ln = txt_linha_corta(TXT_ILHA_PERGUNTA, nome, tinta, tinta, tinta, 255, x + w - 14.0f - lx);
+    ls = txt_linha(TXT_ILHA_TEXTO, sub, tinta, tinta, tinta, sel ? 215 : 150);
+    txt_desenhar_alpha(ln, lx, y + 8.0f, a);
+    txt_desenhar_alpha(ls, lx, y + 8.0f + (float)ln.h + 2.0f, a);
+
+    // progresso dentro do capitulo atual
+    if (cur && durc > 0.5f) {
+      float f = ((float)posSeg - ini) / durc, bw = x + w - 14.0f - lx;
+      if (f < 0.0f) f = 0.0f;
+      if (f > 1.0f) f = 1.0f;
+      gfx_cor((GfxRect){ lx, y + CAPS_LINHA_H - 6.0f - 11.0f, bw, 4.0f }, 0.5f, 1, 1, 1, (sel ? 0.28f : 0.18f) * a);
+      if (f > 0.01f)
+        gfx_cor((GfxRect){ lx, y + CAPS_LINHA_H - 6.0f - 11.0f, bw * f, 4.0f }, 0.5f,
+                sel ? 1.0f : ar, sel ? 1.0f : ag, sel ? 1.0f : ab, 0.95f * a);
+    }
+    y += CAPS_LINHA_H;
+  }
+
+  // barra de rolagem, so quando a lista nao cabe
+  if (capsN > vis && vis > 0) {
+    float th = (float)vis * CAPS_LINHA_H, tx = px + pw - 14.0f, ty = py + CAPS_CABECA;
+    float h = th * (float)vis / (float)capsN, o = th * (float)capsTopo / (float)capsN;
+    gfx_cor((GfxRect){ tx, ty, 4.0f, th - 6.0f }, 0.5f, 1, 1, 1, 0.10f * a);
+    gfx_cor((GfxRect){ tx, ty + o, 4.0f, h }, 0.5f, 1, 1, 1, 0.55f * a);
+  }
+}
+// <<< CAPS-PAINEL
+
 typedef struct { int id, habilitada; } PlrAcao;
 static int transporteSerie(void) { return !ehCanal() && epT >= 0 && epE > 0; }
 static int transporteAcoes(PlrAcao a[PLR_NBTNS]) {
@@ -3365,6 +3550,7 @@ static int transporteAcoes(PlrAcao a[PLR_NBTNS]) {
   a[n++] = (PlrAcao){PLR_AUDIO, 1};
   a[n++] = (PlrAcao){PLR_ASPECTO, 1};
   a[n++] = (PlrAcao){PLR_FONTES, 1};
+  if (temCapitulos()) a[n++] = (PlrAcao){PLR_CAPITULOS, 1};
   if (temUltimoBotao()) a[n++] = (PlrAcao){PLR_EPISODIOS, 1};
   if (serie) a[n++] = (PlrAcao){PLR_NESTE, 1};
   return n;
@@ -4226,6 +4412,7 @@ static int ativarBotao(int i, int repetiu) {
     case PLR_AUDIO: pedFaixas = 1; break;
     case PLR_FONTES: pedFontes = 1; break;
     case PLR_NESTE: nesteAberto = 1; nesteT = epT; nesteE = epE; break;
+    case PLR_CAPITULOS: capsAbrir(); break;
     case PLR_EPISODIOS:
       if (ehCanal()) pedGuia = 1;
       else if (epE > 0) episodios_abrir(idxAtual(), epT, epE);
@@ -4285,6 +4472,21 @@ void player_evento(const SDL_Event *e) {
   // away. Called before any handler returns.
   pausao_activity();
   if (nesteAberto) { nesteAberto = 0; return; }
+  // PAINEL DE CAPITULOS: com ele aberto, a tecla e dele.
+  if (capsAberto) {
+    if (k == SDLK_UP) { capsSel--; capsAjustar(); }
+    else if (k == SDLK_DOWN) { capsSel++; capsAjustar(); }
+    else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) {
+      if (!e->key.repeat && capsSel >= 0 && capsSel < capsN) {
+        double alvo = capsLista[capsSel].inicio, de = posSeg;
+        capsAberto = 0;
+        posSeg = (float)alvo; recuarAutomatico(de, alvo);
+        buscarUsuario(alvo);
+      }
+    } else if (k == SDLK_ESCAPE || k == SDLK_AC_BACK || k == SDLK_BACKSPACE || k == SDLK_DELETE)
+      capsAberto = 0;
+    return;
+  }
 
   // DIGITAR O NUMERO DO CANAL (M7): 1-9 (e o 0 com digitacao em curso) montam o
   // numero; 1,5 s sem tecla ou OK confirma; Voltar cancela so o numero.
@@ -4421,6 +4623,22 @@ void player_evento(const SDL_Event *e) {
     avTecla(k);
     return;
   }
+
+  // CH+/CH- (e PgUp/PgDn) no filme/serie: proximo/anterior CAPITULO do arquivo.
+  // Sem capitulos nada muda: a tecla segue o caminho de antes.
+  { int sc = e->key.keysym.scancode;
+    int prox = sc == NV_SCANCODE_CH_UP   || k == SDLK_PAGEUP;
+    int ant  = sc == NV_SCANCODE_CH_DOWN || k == SDLK_PAGEDOWN;
+    if ((prox || ant) && comVideo && !e->key.repeat) {
+      double alvo = capituloAlvo(prox ? 1 : -1);
+      if (alvo >= 0.0) {
+        // Busca do dono, nao o pulo oficial: nao credita como assistido (#205).
+        { double de = posSeg; posSeg = (float)alvo; recuarAutomatico(de, alvo); }
+        buscarUsuario(alvo);
+        acordar();
+        return;
+      }
+    } }
 
   if (!visivel) {
     // Tudo que acorda daqui acorda INTEIRO; so a busca abaixo volta a pedir
@@ -4569,6 +4787,12 @@ void player_atualizar(float dt, Uint32 agora) {
   playerTelaAtualizar();
 #endif
   if (retido) { player_validar_retido(agora); return; }
+  { // entrada e saida do painel de capitulos
+    float alvoC = capsAberto ? 1.0f : 0.0f, kC = dt * 16.0f;
+    if (kC > 1.0f) kC = 1.0f;
+    capsAnim += (alvoC - capsAnim) * kC;
+    if ((capsAnim > alvoC ? capsAnim - alvoC : alvoC - capsAnim) < 0.003f) capsAnim = alvoC;
+  }
   if (aberto || mini) atualizarIdentidade();
 #ifdef NV_TPK
   // A TV recusou um seek e o arquivo nao tem indice nenhum (mkvfix.h): diz,
@@ -5346,6 +5570,7 @@ static const char *iconeBotao(int i) {
     case PLR_PROXIMO:   return "pl_chevron-right";
     case PLR_REINICIAR: return "pl_rotate-ccw";
     case PLR_NESTE:     return "pl_users";
+    case PLR_CAPITULOS: return "pl_bookmark";
     default:            return epE > 0 ? "pl_list-video" : "pl_film";
   }
 }
@@ -5359,6 +5584,7 @@ static const char *rotuloBotao(int i) {
     case PLR_PROXIMO:   return "Próximo episódio";
     case PLR_REINICIAR: return "Assistir do começo";
     case PLR_NESTE:     return "Neste episódio";
+    case PLR_CAPITULOS: return "Capítulos";
     default:            return ehCanal() ? "Guia" : epE > 0 ? "Epis\xc3\xb3""dios" : "Relacionados";
   }
 }
@@ -5715,7 +5941,8 @@ static float barraPtrX, barraPtrW = NV_TELA_BASE_W;
 static int ponteiroNoPlayer(void) {
   // "O que achou?" com os controles escondidos e dono das teclas
   // (reacao_evento): o alvo de tela inteira do player cobriria as pilulas dele.
-  return ponteiro_ativo() && aberto && !saindo &&
+  // Com a lista de capitulos aberta o clique tambem nao pausa o video por baixo.
+  return ponteiro_ativo() && aberto && !saindo && !capsAberto &&
          !posplay_visivel() && !pausao_visivel() && !(reacao_visivel() && !visivel);
 }
 // DEDO (#216): tocar no video com os controles escondidos so os mostra (o
@@ -6678,6 +6905,10 @@ void player_desenhar(Uint32 agora) {
     plrilha_pedir(&pd);
   }
 
+  // PAINEL DE CAPITULOS: fecha sozinho se a fonte muda, falha ou o player sai.
+  // (Ele se desenha em player_capitulos_desenhar, chamada por app.c.)
+  if (capsAberto && (saindo || erroFonte || player_carregando() || capsN < 1)) capsAberto = 0;
+
   // --- avisos do player: a PILULA DA ILHA que abre (plrilha.h) --------------
   // Era uma pilula de 128 px cheia de acento no meio da tela (o acento como
   // decoracao). Agora o aviso abre a pilula do canto para 64, com o icone do
@@ -7166,14 +7397,22 @@ static void desenharOsdCorpo(Uint32 agora, float a, float ac, const CatItem *c) 
   { float bufFrac = (!ehCanal() && duracaoSeg > 0.0f) ? anim_clamp(video_buffer_fim() / duracaoSeg, 0.0f, 1.0f) : 0.0f;
     // OS CORTES DO TheIntroDB (abertura, resumo, creditos) que o player ja
     // tem: onde cada trecho comeca e acaba, discretos sobre o trilho.
-    float caps[16];
+    // Se o arquivo traz CAPITULOS, as marcas sao os inicios deles (o 1o, em 0, nao
+    // aparece); sem capitulos, ficam os cortes do TheIntroDB como sempre foram.
+    float caps[MKV_MAX_CAPS + 16];
     int nCaps = 0;
     if (!ehCanal() && duracaoSeg > 0.0f) {
-      IntroTrecho tr[8];
-      int nt = intro_trechos(tr, 8), i;
-      for (i = 0; i < nt && nCaps < 15; i++) {
-        caps[nCaps++] = (float)(tr[i].inicio / duracaoSeg);
-        if (tr[i].fim > 0.0) caps[nCaps++] = (float)(tr[i].fim / duracaoSeg);
+      MkvCap lc[MKV_MAX_CAPS];
+      int nl = capmkv_lista(lc, MKV_MAX_CAPS), i;
+      if (nl > 0) {
+        for (i = 0; i < nl; i++) caps[nCaps++] = (float)(lc[i].inicio / duracaoSeg);
+      } else {
+        IntroTrecho tr[8];
+        int nt = intro_trechos(tr, 8);
+        for (i = 0; i < nt && nCaps < 15; i++) {
+          caps[nCaps++] = (float)(tr[i].inicio / duracaoSeg);
+          if (tr[i].fim > 0.0) caps[nCaps++] = (float)(tr[i].fim / duracaoSeg);
+        }
       }
       for (i = 0; i < nCaps; i++) if (caps[i] <= 0.0f || caps[i] >= 1.0f) caps[i--] = caps[--nCaps];
     }

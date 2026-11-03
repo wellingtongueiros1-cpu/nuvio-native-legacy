@@ -207,6 +207,9 @@ void player_marcar_canal(const CatItem *item);
 void player_evento(const SDL_Event *e);
 void player_atualizar(float dt, Uint32 agora);
 void player_desenhar(Uint32 agora);
+// Painel lateral de capitulos (app.c o desenha depois do painel de episodios).
+int  player_capitulos_visivel(void);
+void player_capitulos_desenhar(Uint32 agora);
 int  player_quer_sair(void);  // 1 assim que o Back foi apertado
 void player_encerrar(void);
 // Manual source replacement saves resume position without marking watched.
