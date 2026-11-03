@@ -1,1 +1,154 @@
+# Compila o Nuvio Legacy para Android TV / Google TV (Nvidia Shield) com o menu
+# de capitulos e entrega o .apk como "artifact" (e, se voce quiser, numa Release).
+# Roda so quando voce manda (aba Actions > Build APK com capitulos > Run workflow).
+#
+# RASCUNHO: montado a partir de tools/android.sh e tools/android/deps.sh, sem
+# ter sido executado. Se falhar, copie o final do log do passo que ficou vermelho.
+#
+# Antes: (1) capitulos-no-player.patch e capitulos-icone.patch na RAIZ do repo
+#            (o seu fork ja tem);
+#        (2) secrets NUVIO_SUPABASE_URL, NUVIO_SUPABASE_ANON_KEY e
+#            TV_LOGIN_WEB_BASE_URL (os mesmos do workflow do .ipk);
+#        (3) para poder ATUALIZAR por cima do app instalado, crie os secrets da
+#            chave de assinatura: NUVIO_KEYSTORE_B64, NUVIO_KEYSTORE_PASS,
+#            NUVIO_KEY_ALIAS, NUVIO_KEY_PASS. Sem eles sai um APK de debug com
+#            chave descartavel: instala, mas a proxima versao exige desinstalar.
+name: Build APK com capitulos
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag, branch ou commit (vazio = o padrao do repositorio)"
+        required: false
+        default: ""
+      publicar:
+        description: "Publicar o APK numa Release do GitHub (fica guardado, sem prazo)"
+        type: boolean
+        required: false
+        default: false
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      NUVIO_APK_LITE: "1"          # sem o motor torrent embutido, um APK por ABI
+      NUVIO_P2P_MOTOR: none
+      NUVIO_RUST_MKVCORE: "0"      # nucleo MKV em C (evita configurar o Rust para Android)
+      NUVIO_ANDROID_CACHE: ${{ github.workspace }}/.cache/nuvio-android
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
 
+      - name: Aplicar o menu de capitulos (se ainda nao estiver no codigo)
+        run: |
+          for p in capitulos-no-player.patch capitulos-icone.patch; do
+            if [ ! -f "$p" ]; then
+              echo "$p nao esta na raiz: assumindo que os capitulos ja estao no codigo."
+              continue
+            fi
+            if patch -p1 -R --dry-run < "$p" > /dev/null 2>&1; then
+              echo "$p ja esta aplicado no codigo: pulando."
+            elif patch -p1 --dry-run < "$p" > /tmp/dry.txt 2>&1; then
+              patch -p1 < "$p"
+            else
+              cat /tmp/dry.txt
+              echo "O patch $p nao aplica neste codigo."
+              exit 1
+            fi
+          done
+
+      - name: Configuracao do servidor (local.properties)
+        env:
+          S_URL: ${{ secrets.NUVIO_SUPABASE_URL }}
+          S_KEY: ${{ secrets.NUVIO_SUPABASE_ANON_KEY }}
+          S_TVB: ${{ secrets.TV_LOGIN_WEB_BASE_URL }}
+        run: |
+          for v in S_URL S_KEY S_TVB; do
+            [ -n "${!v}" ] || { echo "Secret ausente: $v (veja o cabecalho deste arquivo)"; exit 1; }
+          done
+          {
+            echo "NUVIO_SUPABASE_URL=$S_URL"
+            echo "NUVIO_SUPABASE_ANON_KEY=$S_KEY"
+            echo "TV_LOGIN_WEB_BASE_URL=$S_TVB"
+          } > local.properties
+          chmod 600 local.properties
+          bash tools/env.sh --require-core > /dev/null
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK e NDK
+        run: |
+          SDKM="${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(command -v sdkmanager)"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+
+      - name: Cache das dependencias nativas
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUVIO_ANDROID_CACHE }}
+          key: nuvio-android-${{ hashFiles('tools/android/deps.sh', 'tools/android/ffmpeg-android.sh', 'tools/android.sh') }}
+
+      - name: libcurl, libjpeg e libwebp para Android (demora na primeira vez)
+        run: bash tools/android/deps.sh
+
+      - name: Chave de assinatura (se houver)
+        env:
+          KS_B64: ${{ secrets.NUVIO_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.NUVIO_KEYSTORE_PASS }}
+          KS_ALIAS: ${{ secrets.NUVIO_KEY_ALIAS }}
+          KS_KEYPASS: ${{ secrets.NUVIO_KEY_PASS }}
+        run: |
+          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ] && [ -n "$KS_ALIAS" ] && [ -n "$KS_KEYPASS" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            chmod 600 "$RUNNER_TEMP/release.jks"
+            {
+              echo "NUVIO_KEYSTORE=$RUNNER_TEMP/release.jks"
+              echo "NUVIO_KEYSTORE_PASS=$KS_PASS"
+              echo "NUVIO_KEY_ALIAS=$KS_ALIAS"
+              echo "NUVIO_KEY_PASS=$KS_KEYPASS"
+            } >> "$GITHUB_ENV"
+            echo "Assinatura de release ligada."
+          else
+            echo "::warning::Sem chave de assinatura: sai APK de debug (a proxima versao nao instala por cima)."
+          fi
+
+      - name: Compilar o APK
+        run: |
+          if [ -n "${NUVIO_KEYSTORE:-}" ]; then
+            bash tools/android.sh --release-only
+          else
+            bash tools/android.sh --debug-only
+          fi
+
+      - name: Localizar os APKs
+        run: |
+          ls -la build/android/*.apk
+          [ -n "$(ls build/android/Nuvio-*.apk 2>/dev/null)" ] || { echo "Nenhum APK foi gerado"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuvio-legacy-apk-capitulos
+          path: build/android/Nuvio-*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publicar numa Release
+        if: ${{ inputs.publicar }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' deploy/app/appinfo.json | head -1)
+          TAG="apk-v${VER}-cap${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" build/android/Nuvio-*.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Nuvio Legacy ${VER} (APK com capitulos, build ${GITHUB_RUN_NUMBER})" \
+            --notes "APK Android TV gerado pelo GitHub Actions. Para Nvidia Shield, use o arquivo arm64."
