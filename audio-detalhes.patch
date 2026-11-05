@@ -1,0 +1,98 @@
+diff --git a/src/dts/dts_engine.c b/src/dts/dts_engine.c
+index 51b1018..1b54cee 100644
+--- a/src/dts/dts_engine.c
++++ b/src/dts/dts_engine.c
+@@ -881,6 +881,8 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
+       DtsTrack *t=&e->info.tracks[e->info.n_tracks++]; t->kind=kind; t->stream_index=i; t->stream_id=s->id;
+       t->channels=p->ch_layout.nb_channels; t->forced=!!(s->disposition&AV_DISPOSITION_FORCED);
+       snprintf(t->codec,sizeof(t->codec),"%s",avcodec_get_name(p->codec_id));
++      t->profile=p->profile>0?p->profile:0; t->sample_rate=p->sample_rate;
++      t->bits=p->bits_per_raw_sample>0?p->bits_per_raw_sample:p->bits_per_coded_sample;
+       copy_metadata(t->language,sizeof(t->language),s->metadata,"language");
+       copy_metadata(t->title,sizeof(t->title),s->metadata,"title");
+     }
+diff --git a/src/dts/dts_media.h b/src/dts/dts_media.h
+index 4f16382..f3ae519 100644
+--- a/src/dts/dts_media.h
++++ b/src/dts/dts_media.h
+@@ -9,6 +9,9 @@ enum { DTS_VIDEO = 1, DTS_AUDIO = 2, DTS_SUBTITLE = 3 };
+ typedef struct {
+   int stream_index, stream_id, kind, channels, forced;
+   char codec[24], language[16], title[64];
++  /* Audio detail read from the file: FFmpeg profile (DTS-HD MA = 60, HRA = 50...),
++   * sample rate and bit depth; 0 when the demuxer did not say. */
++  int profile, sample_rate, bits;
+ } DtsTrack;
+ typedef struct {
+   char video_codec[16], audio_codec[16], hdr[24];
+diff --git a/src/video.c b/src/video.c
+index 94c3560..533f802 100644
+--- a/src/video.c
++++ b/src/video.c
+@@ -3168,6 +3168,53 @@ static void sincronizarPlanoDts(const DtsPlaybackStatus *st) {
+     printf("[dts] native video plane bind pending\n"); fflush(stdout);
+   }
+ }
++/* Audio row of the track sheet for the conversion path: the file's own format, not
++ * the bare FFmpeg codec name ("dts"). "Inglês  ·  DTS-HD MA 7.1 (24-bit)": the sheet
++ * splits at the dot, language above and this below. */
++static int contemSemCaixa(const char *h, const char *n) {
++  size_t ln = strlen(n);
++  for (; *h; h++) if (!strncasecmp(h, n, ln)) return 1;
++  return 0;
++}
++static void formatoAudioMotor(const DtsTrack *t, char *out, size_t tam) {
++  const char *nome = t->codec, *canais = faixasmkv_canais(t->channels);
++  int sem_perda = 0;
++  if (!strcmp(t->codec, "dts")) {
++    switch (t->profile) {   /* AV_PROFILE_DTS_* do FFmpeg */
++      case 60: nome = "DTS-HD MA"; sem_perda = 1; break;
++      case 61: nome = "DTS-HD MA + DTS:X"; sem_perda = 1; break;
++      case 62: nome = "DTS-HD MA + DTS:X IMAX"; sem_perda = 1; break;
++      case 50: nome = "DTS-HD HRA"; break;
++      case 70: nome = "DTS Express"; break;
++      case 30: nome = "DTS-ES"; break;
++      case 40: nome = "DTS 96/24"; break;
++      default: nome = "DTS"; break;
++    }
++    /* Muitos MKV trazem a faixa so como A_DTS; o nome que o arquivo da diz mais. */
++    if (nome[3] == 0 && contemSemCaixa(t->title, "DTS-HD MA")) { nome = "DTS-HD MA"; sem_perda = 1; }
++    else if (nome[3] == 0 && contemSemCaixa(t->title, "DTS:X")) nome = "DTS:X";
++  } else if (!strcmp(t->codec, "truehd")) { nome = "TrueHD"; sem_perda = 1; }
++  else if (!strcmp(t->codec, "mlp")) { nome = "MLP"; sem_perda = 1; }
++  else if (!strcmp(t->codec, "eac3")) nome = "E-AC-3";
++  else if (!strcmp(t->codec, "ac3")) nome = "AC-3";
++  else if (!strcmp(t->codec, "aac")) nome = "AAC";
++  else if (!strcmp(t->codec, "flac")) { nome = "FLAC"; sem_perda = 1; }
++  else if (!strcmp(t->codec, "opus")) nome = "Opus";
++  snprintf(out, tam, "%s%s%s", nome, canais[0] ? " " : "", canais);
++  if (contemSemCaixa(t->title, "Atmos") && strcmp(t->codec, "dts")) {
++    size_t n = strlen(out);
++    snprintf(out + n, tam - n, " Atmos");
++  }
++  if (sem_perda && t->bits >= 16) {
++    size_t n = strlen(out);
++    if (t->sample_rate > 48000)
++      snprintf(out + n, tam - n, " (%d-bit %d kHz)", t->bits, t->sample_rate / 1000);
++    else snprintf(out + n, tam - n, " (%d-bit)", t->bits);
++  } else if (t->sample_rate > 48000) {
++    size_t n = strlen(out);
++    snprintf(out + n, tam - n, " (%d kHz)", t->sample_rate / 1000);
++  }
++}
+ static void bombearDts(void) {
+   DtsPlaybackStatus st;
+   char event[2048];
+@@ -3239,6 +3286,12 @@ static void bombearDts(void) {
+       if (!strcmp(t->codec, "ass") || !strcmp(t->codec, "ssa"))
+         snprintf(f->codec, sizeof f->codec, "S_TEXT/ASS");
+       snprintf(f->idioma, sizeof f->idioma, "%.7s", t->language);
++      if (t->kind == DTS_AUDIO) {
++        char fmt[48];
++        formatoAudioMotor(t, fmt, sizeof fmt);
++        snprintf(f->rotulo, sizeof f->rotulo, "%.20s  \xc2\xb7  %s", t->language[0] ?
++                 i18n(ling_nome(t->language)) : i18n("Faixa"), fmt);
++      } else
+       snprintf(f->rotulo, sizeof f->rotulo, "%.26s · %.12s", t->language[0] ?
+                i18n(ling_nome(t->language)) : i18n("Faixa"), t->codec);
+     }
