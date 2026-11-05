@@ -1,0 +1,95 @@
+diff --git a/src/ajustes.c b/src/ajustes.c
+index 1629286..63a9eff 100644
+--- a/src/ajustes.c
++++ b/src/ajustes.c
+@@ -820,8 +820,8 @@ static const char *V_BRILHO_PLAYER[] = { "100%", "80%", "65%", "50%" };
+ static const char *V_DTS_SAIDA[] = { "Desligado", "5.1 (Dolby Digital)", "Estéreo (AAC)" };
+ #define N_DTS_SAIDA 3
+ #else
+-static const char *V_DTS_SAIDA[] = { "Estéreo (AAC)", "5.1 (Dolby Digital)" };
+-#define N_DTS_SAIDA 2
++static const char *V_DTS_SAIDA[] = { "Estéreo (AAC)", "5.1 (Dolby Digital)", "Direto pela TV (sem converter)" };
++#define N_DTS_SAIDA 3
+ #endif
+ static const char *V_PROPORCAO[] = { "Último usado", "Original", "Recortar", "Esticar", "Zoom leve", "Zoom cinema", "Zoom ultra", "Ajustar altura", "Ajustar largura" };
+ static const char *V_LOGO_APP[] = { "Novo", "Clássico" };
+@@ -3805,6 +3805,15 @@ int ajustes_cw_ordem(void)            { return valor[AJ_CW_ORDEM]; }
+ int ajustes_cw_retido_tambem(void)    { return lig(AJ_CW_RETIDO_TAMBEM); }
+ int ajustes_ps_continuar(void)        { return lig(AJ_PS_CONTINUAR); }
+ int ajustes_dts_ac3(void)             { return valor[AJ_DTS_AC3] == 1; }
++// LG: 2 = "Direto pela TV": o DTS vai ao player da TV sem converter (TV que decodifica
++// DTS). O TrueHD continua convertido; o erro 200 ainda aciona a conversao.
++int ajustes_dts_direto(void) {
++#ifdef NV_TPK
++  return 0;
++#else
++  return valor[AJ_DTS_AC3] == 2;
++#endif
++}
+ // .tpk: HLS (o TS continuo e so a troca automatica de video_tpk.c) ou desligado.
+ int ajustes_dts_tpk_modo(void) {
+ #ifdef NV_TPK
+@@ -8051,7 +8060,7 @@ static const char *ajudaOpcaoBase(int op) {
+ #ifdef NV_TPK
+     case AJ_DTS_AC3: return "Esta TV não toca DTS nem TrueHD: o app converte o som na hora. 5.1 (Dolby Digital) mantém o surround para barra de som e receiver; 7.1, Atmos e DTS:X viram 5.1, sem os objetos. Estéreo (AAC) serve qualquer TV. Desligado: esses vídeos tocam sem som, como antes. Vale a partir do próximo vídeo.";
+ #else
+-    case AJ_DTS_AC3: return "Como o áudio DTS é entregue à TV quando o app o converte (só na LG). Estéreo (AAC) é o modo provado e serve qualquer TV. 5.1 (Dolby Digital) mantém o som surround para barra de som e receiver por ARC/eARC; vale a partir do próximo vídeo.";
++    case AJ_DTS_AC3: return "Como o áudio DTS é entregue à TV quando o app o converte (só na LG). Estéreo (AAC) é o modo provado e serve qualquer TV. 5.1 (Dolby Digital) mantém o som surround para barra de som e receiver por ARC/eARC. \"Direto pela TV\" não converte o DTS: serve para TV que decodifica DTS (alguns modelos 2023/24); se o DTS ficar sem som, volte para uma das outras. O TrueHD continua convertido. Vale a partir do próximo vídeo.";
+ #endif
+     case AJ_PS_CONTINUAR: return "Ligado, cada perfil mostra na escolha de perfil o cartão com o que ele estava assistindo. Desligado, a tela mostra só os perfis.";
+     case AJ_HIST_CONTA: return "Ligado (padrão): o que você assiste neste perfil sobe para a conta Nuvio, com o progresso e os vistos. Desligado: nada disso é enviado à conta; o Trakt e o Simkl vinculados a este perfil continuam recebendo. Vale só para este perfil.";
+diff --git a/src/ajustes.h b/src/ajustes.h
+index 354decb..426ec07 100644
+--- a/src/ajustes.h
++++ b/src/ajustes.h
+@@ -664,6 +664,7 @@ int   ajustes_cw_proximo(void);   // 1 = 'a seguir' entra em Continuar assistind
+ int   ajustes_cw_mostrar_nao_exibidos(void);  // showUnairedNextUp
+ // continueWatchingSortMode: 0 default, 1 streaming_style, 2 split_upcoming
+ int   ajustes_cw_ordem(void);
++int   ajustes_dts_direto(void);          // LG: 1 = DTS direto pela TV, sem converter (TrueHD continua convertido)
+ int   ajustes_dts_ac3(void);             // 1 = DTS convertido em AC3 5.1 (LG, e padrao no .tpk); 0 = AAC estereo (.tpk: ou desligado)
+ int   ajustes_dts_tpk_modo(void);        // .tpk: DTSTPK_HLS, ou DTSTPK_DESLIGADO com a conversao desligada
+ int   ajustes_ps_continuar(void);        // #303: 0 = sem o cartao "continuar" na escolha de perfil
+diff --git a/src/ajustes_ux_cenas_reproducao.inc b/src/ajustes_ux_cenas_reproducao.inc
+index fc044c6..19e516b 100644
+--- a/src/ajustes_ux_cenas_reproducao.inc
++++ b/src/ajustes_ux_cenas_reproducao.inc
+@@ -560,6 +560,13 @@ static void rDts(void) {   // DTS -> estereo (2 caixas) ou 5.1 (6 caixas); .tpk
+     ajc_icone("aj_x", 340, 262, 22, 0.6f);
+     return;
+   }
++#else
++  if (valor[AJ_DTS_AC3] == 2) {   // Direto pela TV: sem conversao, a TV toca o DTS
++    ajc_tv(250, 110, 140, 78, 1);
++    ajc_ret(256, 116, 128, 66, 6, 0.06f, 0.06f, 0.08f, 1);
++    ajc_icone("aj_volume-2", 320, 262, 30, 0.9f);
++    return;
++  }
+ #endif
+   ajc_icone("aj_chevron-right", 190, 43, 24, 0.7f);
+   ajcSelo(s51 ? "5.1" : "AAC", 232, 26, 16, 1, 1);
+diff --git a/src/video.c b/src/video.c
+index e20da21..94c3560 100644
+--- a/src/video.c
++++ b/src/video.c
+@@ -2432,8 +2432,10 @@ void video_bombear(void) {
+     // de tocar, inclusive os modelos 2023/24 que tem DTS: nao da para detectar
+     // o suporte com seguranca (o webOS 26 toca MUDO sem errorCode 200, #285).
+     // So a C9 e anteriores (webOS < 5) usam o caminho nativo + errorCode 200.
++    // "Direto pela TV" (Ajustes): o DTS vai ao player da TV sem converter; so o erro
++    // 200 (a TV recusou) ainda aciona a conversao.
+     if ((audioNaoSup && knownDts) || forcar || knownTh ||
+-        nv_dts_converter_ja(webosMaior(), knownDts, 1, dtsTentou)) {
++        (!ajustes_dts_direto() && nv_dts_converter_ja(webosMaior(), knownDts, 1, dtsTentou))) {
+       dtsEstado = VIDEO_DTS_PREPARANDO;
+       iniciarDts(-1);
+     }
+@@ -3111,7 +3113,7 @@ static int iniciarDts(int stream) {
+     return 0;
+   }
+   dtsMarcarAbertas(dtsAbertasSemFechar() + 1);
+-  dts_engine_set_ac3(ajustes_dts_ac3());
++  dts_engine_set_ac3(ajustes_dts_ac3() || ajustes_dts_direto());   // direto: o TrueHD/erro 200 saem em 5.1
+   dts_engine_set_ahead_mib(cacheboost_backend_buffer_mb());   // #338: Settings > Buffer size
+   dts_playback_next_dv(dtsModoDv);
+   dts_playback_next_p7(ajustes_dv7());
