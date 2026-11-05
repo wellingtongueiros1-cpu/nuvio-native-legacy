@@ -1,7 +1,8 @@
 # Compila o Nuvio Legacy (LG webOS) com o menu de capitulos e o TrueHD e entrega o .ipk
 # como "artifact" para baixar. Roda so quando voce manda (aba Actions > Run workflow).
 #
-# Antes: (1) subir capitulos-no-player.patch, capitulos-icone.patch e truehd.patch na RAIZ do repositorio;
+# Antes: (1) subir capitulos-no-player.patch, capitulos-icone.patch, truehd.patch e dts-direto.patch na RAIZ do repositorio;
+#        (1b) tambem truehd.patch e dts-direto.patch (nessa ordem de aplicacao);
 #        (2) criar os 3 secrets NUVIO_SUPABASE_URL, NUVIO_SUPABASE_ANON_KEY e
 #            TV_LOGIN_WEB_BASE_URL (Settings > Secrets and variables > Actions).
 name: Build IPK com capitulos
@@ -69,6 +70,14 @@ jobs:
           fi
           patch -p1 --dry-run < truehd.patch
           patch -p1 < truehd.patch
+
+      - name: Aplicar a opcao DTS direto pela TV
+        run: |
+          if [ ! -f dts-direto.patch ]; then
+            echo "FALTA dts-direto.patch na raiz do repositorio"; exit 1
+          fi
+          patch -p1 --dry-run < dts-direto.patch
+          patch -p1 < dts-direto.patch
 
       - name: Configuracao do servidor (local.properties)
         env:
