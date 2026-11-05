@@ -1,0 +1,296 @@
+diff --git a/src/dts/dts_engine.c b/src/dts/dts_engine.c
+index a5ce605..51b1018 100644
+--- a/src/dts/dts_engine.c
++++ b/src/dts/dts_engine.c
+@@ -782,6 +782,12 @@ int64_t dts_engine_source_total(DtsEngine *e) {
+ }
+ void dts_engine_dv(DtsEngine *e, int enabled) { if (e) e->dv = !!enabled; }
+ void dts_engine_allow_p7(DtsEngine *e, int enabled) { if (e) e->allow_p7 = !!enabled; }
++/* DTS always converts. TrueHD/MLP convert too (decoded and re-encoded to AC3 5.1 or
++ * stereo AAC like DTS), except on the Dolby Vision path, where audio that is not
++ * AC-3/E-AC-3 is never taken here. */
++static int convertible_codec(const DtsEngine *e,enum AVCodecID id) {
++  return id==AV_CODEC_ID_DTS || (!e->dv && (id==AV_CODEC_ID_TRUEHD || id==AV_CODEC_ID_MLP));
++}
+ int dts_engine_available(void) {
+   return avcodec_find_decoder(AV_CODEC_ID_DTS) && avcodec_find_encoder(AV_CODEC_ID_AAC) && av_bsf_get_by_name("h264_mp4toannexb")
+       && av_bsf_get_by_name("hevc_mp4toannexb");
+@@ -868,7 +874,7 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
+     if(p->codec_type==AVMEDIA_TYPE_VIDEO && e->info.video_stream<0 && !(s->disposition&AV_DISPOSITION_ATTACHED_PIC))
+       e->info.video_stream=i;
+     /* Dolby Vision path: AC-3/E-AC-3 go to the TV untouched (passthrough). */
+-    if((p->codec_id==AV_CODEC_ID_DTS || (e->dv && (p->codec_id==AV_CODEC_ID_AC3 || p->codec_id==AV_CODEC_ID_EAC3)))
++    if((convertible_codec(e,p->codec_id) || (e->dv && (p->codec_id==AV_CODEC_ID_AC3 || p->codec_id==AV_CODEC_ID_EAC3)))
+        && e->info.audio_stream<0 && (audio<0 || audio==(int)i)) e->info.audio_stream=i;
+     int kind=p->codec_type==AVMEDIA_TYPE_VIDEO?DTS_VIDEO:p->codec_type==AVMEDIA_TYPE_AUDIO?DTS_AUDIO:p->codec_type==AVMEDIA_TYPE_SUBTITLE?DTS_SUBTITLE:0;
+     if(kind && e->info.n_tracks<DTS_TRACK_MAX) {
+@@ -918,7 +924,7 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
+     if((r=av_bsf_init(e->bsf))<0) return fail(e,"Video filter open",r);
+   }
+   AVCodecParameters *ap=e->fmt->streams[e->info.audio_stream]->codecpar;
+-  e->passthrough=ap->codec_id!=AV_CODEC_ID_DTS;
++  e->passthrough=!convertible_codec(e,ap->codec_id);
+   if(e->passthrough) {
+     e->in=av_packet_alloc(); e->out=av_packet_alloc();
+     if(!e->in || !e->out) return fail(e,"Audio queue allocation",0);
+@@ -930,17 +936,19 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
+     e->target_ns=(int64_t)(start*1000000000.0);
+     return start>0?dts_engine_seek(e,start):0;
+   }
+-  const AVCodec *decoder=avcodec_find_decoder(AV_CODEC_ID_DTS);
+-  if(!decoder) return fail(e,"DTS decoder absent",0);
++  const int is_dts=ap->codec_id==AV_CODEC_ID_DTS;
++  const AVCodec *decoder=avcodec_find_decoder(ap->codec_id);
++  if(!decoder) return fail(e,is_dts?"DTS decoder absent":"TrueHD decoder absent",0);
+   e->dec=avcodec_alloc_context3(decoder);
+-  if(!e->dec) return fail(e,"DTS decoder allocation",0);
++  if(!e->dec) return fail(e,is_dts?"DTS decoder allocation":"TrueHD decoder allocation",0);
+   avcodec_parameters_to_context(e->dec,ap);
+   e->dec->pkt_timebase=e->fmt->streams[e->info.audio_stream]->time_base;
+-  /* Corrupt HD extensions must reach the worker error path; an explicit
+-   * core-only reopen decides whether to discard the failed extension. */
+-  e->dec->err_recognition=AV_EF_EXPLODE;
+-  if(core && av_opt_set_int(e->dec->priv_data,"core_only",1,0)<0) return fail(e,"DTS core-only unavailable",0);
+-  if((r=avcodec_open2(e->dec,decoder,NULL))<0) return fail(e,"DTS decoder open",r);
++  if(is_dts) {
++    /* Corrupt HD extensions must reach the worker error path; an explicit
++     * core-only reopen decides whether to discard the failed extension. */
++    e->dec->err_recognition=AV_EF_EXPLODE;
++    if(core && av_opt_set_int(e->dec->priv_data,"core_only",1,0)<0) return fail(e,"DTS core-only unavailable",0);
++  }
+   /* AC3 5.1 only when asked and the build has the encoder; else stereo AAC. */
+   const AVCodec *encoder=g_surround_ac3?avcodec_find_encoder(AV_CODEC_ID_AC3):NULL;
+   int out_channels=2;
+@@ -949,6 +957,15 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
+     out_channels=(in_channels==0 || in_channels>2)?6:2;
+   } else encoder=avcodec_find_encoder(AV_CODEC_ID_AAC);
+   if(!encoder) return fail(e,"Audio encoder absent",0);
++  if(!is_dts && (ap->ch_layout.nb_channels==0 || ap->ch_layout.nb_channels>out_channels)) {
++    /* TrueHD/MLP: ask the decoder for the presentation authored at the output
++     * width (the 5.1 or 2.0 mix) instead of decoding 7.1 and folding it down. */
++    AVChannelLayout target={0};
++    av_channel_layout_default(&target,out_channels);
++    av_opt_set_chlayout(e->dec->priv_data,"downmix",&target,0);
++    av_channel_layout_uninit(&target);
++  }
++  if((r=avcodec_open2(e->dec,decoder,NULL))<0) return fail(e,is_dts?"DTS decoder open":"TrueHD decoder open",r);
+   e->enc=avcodec_alloc_context3(encoder);
+   if(!e->enc) return fail(e,"Audio encoder absent",0);
+   e->enc->codec_id=encoder->id;
+diff --git a/src/dts/dts_playback.c b/src/dts/dts_playback.c
+index 184fdf5..e15c902 100644
+--- a/src/dts/dts_playback.c
++++ b/src/dts/dts_playback.c
+@@ -155,10 +155,13 @@ static void rest(DtsPlayback *p) {
+   if (!p->stop) pthread_cond_timedwait(&p->wake, &p->lock, &t);
+   pthread_mutex_unlock(&p->lock);
+ }
+-/* Codecs this session can feed: DTS is converted; on the Dolby Vision path
+- * AC-3 and E-AC-3 pass through. Anything else belongs to the native player. */
++/* Codecs this session can feed: DTS and TrueHD/MLP are converted (TrueHD never
++ * on the Dolby Vision path); on the Dolby Vision path AC-3 and E-AC-3 pass
++ * through. Anything else belongs to the native player. */
+ static int codecFeeds(const DtsPlayback *p, const char *codec) {
+-  return !strcmp(codec, "dts") || (p->dv && (!strcmp(codec, "ac3") || !strcmp(codec, "eac3")));
++  return !strcmp(codec, "dts") ||
++      (!p->dv && (!strcmp(codec, "truehd") || !strcmp(codec, "mlp"))) ||
++      (p->dv && (!strcmp(codec, "ac3") || !strcmp(codec, "eac3")));
+ }
+ static int trackMatches(DtsPlayback *p, const DtsTrack *t) {
+   return t->kind == DTS_AUDIO && codecFeeds(p, t->codec) &&
+diff --git a/src/faixasmkv.c b/src/faixasmkv.c
+index 45432f4..7ef8fa9 100644
+--- a/src/faixasmkv.c
++++ b/src/faixasmkv.c
+@@ -295,3 +295,31 @@ int faixasmkv_acrescentar_imagem(VideoFaixa *leg, int nLeg, int max, const MkvFa
+ int faixasmkv_acrescentar_texto(VideoFaixa *leg, int nLeg, int max, const MkvFaixa *fx, int n) {
+   return acrescentarOverlay(leg, nLeg, max, fx, n, 1);
+ }
++
++static int audioOculto(const char *codec) {
++  const char *c = audioinfo_codec(codec);
++  return !strcmp(c, "TrueHD") || !strcmp(c, "MLP");
++}
++
++int faixasmkv_acrescentar_audio_oculto(VideoFaixa *aud, int nAud, int max, const MkvFaixa *fx, int n) {
++  int j, k, ord = 0, nA = 0, falta;
++  for (j = 0; fx && j < n; j++) if (fx[j].tipo == MKV_AUDIO) nA++;
++  falta = nA - nAud;
++  if (falta <= 0) return nAud;
++  // A TV lista alguma TrueHD (so nao toca): ela conhece a faixa, nada a recuperar.
++  for (k = 0; k < nAud; k++) if (audioOculto(aud[k].codec)) return nAud;
++  for (j = 0; j < n && nAud < max && falta > 0; j++) {
++    if (fx[j].tipo != MKV_AUDIO) continue;
++    ord++;
++    if (!audioOculto(fx[j].codec)) continue;
++    for (k = 0; k < nAud; k++) if (aud[k].numero < 0 && aud[k].ordinalMkv == ord - 1) break;
++    if (k < nAud) continue;
++    memset(&aud[nAud], 0, sizeof aud[nAud]);
++    aud[nAud].numero = -2 - (ord - 1);
++    aud[nAud].stream_index = aud[nAud].stream_id = -1;
++    aud[nAud].ordinalMkv = ord - 1;
++    aplicarUma(&aud[nAud], &fx[j], nAud + 1);
++    nAud++; falta--;
++  }
++  return nAud;
++}
+diff --git a/src/faixasmkv.h b/src/faixasmkv.h
+index 5c81bac..eb8a2cd 100644
+--- a/src/faixasmkv.h
++++ b/src/faixasmkv.h
+@@ -62,6 +62,13 @@ int faixasmkv_tem_imagem(const MkvFaixa *fx, int n);
+ // ordinalMkv do arquivo. Idempotente. Devolve o novo `nLeg`.
+ int faixasmkv_acrescentar_imagem(VideoFaixa *leg, int nLeg, int max, const MkvFaixa *fx, int n);
+ 
++// TrueHD/MLP que o player da TV esconde (LG: nao decodifica e nao lista): recoloca
++// no fim de `aud` as faixas do arquivo, com numero negativo unico (sem faixa no
++// player), stream_index -1 e ordinalMkv = posicao entre os audios do ARQUIVO.
++// So age quando o arquivo tem MAIS audios que a TV listou e a TV nao lista nenhuma
++// TrueHD; nunca acrescenta mais faixas que a diferenca. Idempotente. Devolve o novo `nAud`.
++int faixasmkv_acrescentar_audio_oculto(VideoFaixa *aud, int nAud, int max, const MkvFaixa *fx, int n);
++
+ // Append omitted ASS/SSA/SRT/WebVTT tracks for the LG overlay. Native entries
+ // stay unchanged; recovered entries have unique negative numbers. Idempotent.
+ int faixasmkv_acrescentar_texto(VideoFaixa *leg, int nLeg, int max, const MkvFaixa *fx, int n);
+diff --git a/src/video.c b/src/video.c
+index 2c70899..e20da21 100644
+--- a/src/video.c
++++ b/src/video.c
+@@ -148,6 +148,14 @@ int video_faixa_dts(const VideoFaixa *f) {
+       strstr(s, "dts-ma") || strstr(s, "dts ma")) return 2;
+   return 1;
+ }
++// TrueHD/MLP: nenhuma LG decodifica e o player da TV esconde a faixa. O app a
++// converte como o DTS (decodifica e reencoda em AC3 5.1 / AAC), pelo mesmo motor.
++static int video_faixa_truehd(const VideoFaixa *f) {
++  const char *c;
++  if (!f) return 0;
++  c = audioinfo_codec(f->codec);
++  return !strcmp(c, "TrueHD") || !strcmp(c, "MLP");
++}
+ // So o ramo webOS escreve aqui (PREPARANDO, CONVERTIDO, FALHOU): o resto sai
+ // da faixa e do pipeline, igual em todos os alvos. No Mac, video_simular.
+ static int dtsEstado;
+@@ -663,6 +671,11 @@ static char dtsLegUrlAntes[1024];
+ static char cabsHttp[512];
+ static int iniciarDts(int stream);
+ static void bombearDts(void);
++// Audios do arquivo (so os de audio, na ordem do MKV): a TV esconde TrueHD, e a
++// lista de audio e refeita a cada sourceInfo, entao a recuperacao precisa de onde
++// reaplicar. Zerado a cada fonte nova.
++static MkvFaixa mkvAudioFx[16];
++static int      mkvAudioFxN;
+ static int dtsLiberadoNestaTv(void);
+ // RECONEXAO (video_reconexao.h). O erro chega no fio do LS2 e so ANOTA
+ // (reconErroPend); a decisao e o recarregar sao do video_bombear, no fio
+@@ -1096,6 +1109,10 @@ static int eventoPayload(const char *p, unsigned minhaSessao) {
+         o = js_prox(fo);
+       }
+     }
++    // A lista foi refeita do zero: a TrueHD que a TV esconde volta, se a sonda do
++    // MKV ja tinha lido o arquivo.
++    if (dtsHabilitado && !dtsSessao && mkvAudioFxN > 0)
++      nAudio = faixasmkv_acrescentar_audio_oculto(faixaAudio, nAudio, NV_FAIXA_MAX, mkvAudioFx, mkvAudioFxN);
+     // DIAGNOSTICO: despeja o sourceInfo CRU uma vez por titulo. A TV nao
+     // devolve idioma de legenda nos arquivos do dono (todas saem como
+     // "Legenda N"), e sem ver o JSON de verdade qualquer conserto e chute —
+@@ -1170,7 +1187,8 @@ static int eventoPayload(const char *p, unsigned minhaSessao) {
+       for (i = 0; i < nAudio; i++) {
+         c[i].idioma = faixaAudio[i].idioma; c[i].codec = faixaAudio[i].codec;
+         c[i].rotulo = faixaAudio[i].rotulo; c[i].canais = faixaAudio[i].canais;
+-        c[i].dts = audioesc_dts_truehd(faixaAudio[i].codec, faixaAudio[i].rotulo); c[i].pode = 1;
++        c[i].dts = audioesc_dts_truehd(faixaAudio[i].codec, faixaAudio[i].rotulo);
++        c[i].pode = faixaAudio[i].numero >= 0;   // TrueHD recuperada do MKV: so a pessoa escolhe
+         c[i].numero = faixaAudio[i].numero;
+       }
+       k = audioesc_escolher(c, nAudio, &o);
+@@ -2116,6 +2134,12 @@ static void *lerMkv(void *arg) {
+       }
+     }
+     dvAudios = na; }
++  // TrueHD/MLP escondida pela TV: entra na lista de audio com o que o arquivo diz.
++  { int q = 0;
++    for (j = 0; j < n && q < 16; j++) if (fx[j].tipo == 2) mkvAudioFx[q++] = fx[j];
++    mkvAudioFxN = q;
++    if (dtsHabilitado && !dtsSessao)
++      nAudio = faixasmkv_acrescentar_audio_oculto(faixaAudio, nAudio, NV_FAIXA_MAX, mkvAudioFx, mkvAudioFxN); }
+ 
+   // DIAGNOSTICO DO DV (203-dvrpu). "Sem [dv] file:" tinha tres causas possiveis
+   // e o log nao separava: o arquivo nao tem dvcC; o Tracks nao coube; ou o DV
+@@ -2338,7 +2362,7 @@ int video_tocar(const char *url) {
+   dtsTentou = 0; dtsRevisao = 0; dtsSaida[0] = 0; dtsNativePending = 0; dtsEstado = 0;
+   dtsHabilitado = dts_playback_enabled() && dtsLiberadoNestaTv();
+   printf("[dts] fallback %s\n", dtsHabilitado ? "available" : "unavailable");
+-  dvSondado = dvMkvPerfil = dvAudios = 0; dtsModoDv = 0; dvAudioMkvOrd = -1; dvSegurar = 0;
++  dvSondado = dvMkvPerfil = dvAudios = mkvAudioFxN = 0; dtsModoDv = 0; dvAudioMkvOrd = -1; dvSegurar = 0;
+   mkvNaoMkv = 0;
+   dvNao = 0; dvSessaoN++; dvFonteAberta = 0; dvAudioDe[0] = 0;
+   nv_dvsonda_zerar(&mkvRetry); mkvRetryEm = 0; dvEntradaSeg = 0.0;
+@@ -2395,6 +2419,9 @@ void video_bombear(void) {
+     // de TrueHD e de faixa ainda sem codec; o fallback derrubava a reproducao
+     // nativa, que na 2.0.0 seguia. Sem a lista de faixas, espera ela chegar.
+     int knownDts = video_faixa_dts(video_audio(audioAtual)) > 0;
++    // TrueHD/MLP: nenhuma LG toca, entao converte logo que e a faixa atual (unica
++    // do arquivo, recuperada do MKV, ou escolhida na lista).
++    int knownTh = video_faixa_truehd(video_audio(audioAtual));
+     int forcar = 0;
+ #ifdef NV_DTS_DEBUG
+     // A C9 decodifica DTS sozinha: sem isto o caminho de conversao nunca roda
+@@ -2405,7 +2432,7 @@ void video_bombear(void) {
+     // de tocar, inclusive os modelos 2023/24 que tem DTS: nao da para detectar
+     // o suporte com seguranca (o webOS 26 toca MUDO sem errorCode 200, #285).
+     // So a C9 e anteriores (webOS < 5) usam o caminho nativo + errorCode 200.
+-    if ((audioNaoSup && knownDts) || forcar ||
++    if ((audioNaoSup && knownDts) || forcar || knownTh ||
+         nv_dts_converter_ja(webosMaior(), knownDts, 1, dtsTentou)) {
+       dtsEstado = VIDEO_DTS_PREPARANDO;
+       iniciarDts(-1);
+@@ -3050,6 +3077,13 @@ static int iniciarDts(int stream) {
+     snprintf(selected.codec, sizeof selected.codec, "%s", a->codec);
+     selected.channels = a->canais;
+   }
++  // TrueHD que a TV esconde: a posicao na lista do app nao e a do arquivo. O ordinal
++  // e o contador sao os do MKV; canais ficam 0 = nao conferir (o MKV e o FFmpeg
++  // podem contar diferente numa faixa Atmos).
++  if (a && a->numero < 0 && a->ordinalMkv >= 0 && video_faixa_truehd(a) && dvAudios > 0) {
++    ordinal = a->ordinalMkv; count = dvAudios;
++    selected.channels = 0;
++  }
+   // DV com a faixa trocada pelo dvPronto: ordinal, contagem e idioma sao os do
+   // MKV (dts_playback.c prepare(): o k-esimo audio do arquivo, conferido por
+   // idioma e por codec que o caminho alimenta). Canais ficam 0 = nao conferir.
+@@ -3240,7 +3274,9 @@ static void bombearDts(void) {
+     /* Converted only when the source track is DTS; on the Dolby Vision path
+      * AC-3/E-AC-3 pass through untouched and there is nothing to label. */
+     if (!dtsModoDv || (audioAtual >= 0 && audioAtual < nAudio && !strcmp(faixaAudio[audioAtual].codec, "dts"))) {
+-      snprintf(dtsSaida, sizeof dtsSaida, "%s", !strcmp(st.info.audio_codec, "ac3") ? "DTS → AC3 5.1" : "DTS → AAC Stereo");
++      { int th = audioAtual >= 0 && audioAtual < nAudio && video_faixa_truehd(&faixaAudio[audioAtual]);
++        snprintf(dtsSaida, sizeof dtsSaida, "%s → %s", th ? "TrueHD" : "DTS",
++                 !strcmp(st.info.audio_codec, "ac3") ? "AC3 5.1" : "AAC Stereo"); }
+       dtsEstado = VIDEO_DTS_CONVERTIDO;
+     } else { dtsSaida[0] = 0; dtsEstado = 0; }
+     if (expWin[0]) expJanelaAplicar();
+@@ -3744,6 +3780,7 @@ void video_escolher_audio(int i) {
+   if (dtsSessao && f) {
+     if (f->stream_index < 0) return;
+     if (!strcmp(f->codec, "dts") ||
++        (!dtsModoDv && (!strcmp(f->codec, "truehd") || !strcmp(f->codec, "mlp"))) ||
+         (dtsModoDv && (!strcmp(f->codec, "eac3") || !strcmp(f->codec, "ac3")))) {
+       dts_playback_seek(dtsSessao, posSeg);
+       dts_playback_audio(dtsSessao, f->stream_index);
+@@ -3765,6 +3802,15 @@ void video_escolher_audio(int i) {
+   }
+ 
+   if (!ligado || !midia[0] || !f) return;
++  /* TrueHD/MLP the TV player never listed (recovered from the MKV): there is no
++   * native track to select, so the conversion path takes the file. */
++  if (f->numero < 0) {
++    if (!dtsHabilitado || dtsNativePending || !urlAtual[0] || !video_faixa_truehd(f)) return;
++    audioAtual = i;
++    dtsEstado = VIDEO_DTS_PREPARANDO;
++    iniciarDts(-1);
++    return;
++  }
+   /* Unsupported audio belongs to the previous selection. Give the new native
+    * track a chance before allowing its own codec error to trigger conversion. */
+   if (i != audioAtual) audioNaoSup = 0;
