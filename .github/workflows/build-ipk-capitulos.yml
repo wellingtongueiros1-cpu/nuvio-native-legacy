@@ -1,8 +1,8 @@
 # Compila o Nuvio Legacy (LG webOS) com o menu de capitulos e o TrueHD e entrega o .ipk
 # como "artifact" para baixar. Roda so quando voce manda (aba Actions > Run workflow).
 #
-# Antes: (1) subir capitulos-no-player.patch, capitulos-icone.patch, truehd.patch, dts-direto.patch, audio-detalhes.patch, legenda-pgs.patch e truehd-ac3.patch na RAIZ do repositorio;
-#        (1b) ordem de aplicacao: capitulos-no-player, capitulos-icone, truehd, dts-direto, audio-detalhes, legenda-pgs, truehd-ac3;
+# Antes: (1) subir capitulos-no-player.patch, capitulos-icone.patch, truehd.patch, dts-direto.patch, audio-detalhes.patch, legenda-pgs.patch, truehd-ac3.patch, truehd-rotulos.patch e truehd-tolerante.patch na RAIZ do repositorio;
+#        (1b) ordem de aplicacao: capitulos-no-player, capitulos-icone, truehd, dts-direto, audio-detalhes, legenda-pgs, truehd-ac3, truehd-rotulos, truehd-tolerante;
 #        (2) criar os 3 secrets NUVIO_SUPABASE_URL, NUVIO_SUPABASE_ANON_KEY e
 #            TV_LOGIN_WEB_BASE_URL (Settings > Secrets and variables > Actions).
 name: Build IPK com capitulos
@@ -102,6 +102,22 @@ jobs:
           fi
           patch -p1 --dry-run < truehd-ac3.patch
           patch -p1 < truehd-ac3.patch
+
+      - name: Aplicar os rotulos do TrueHD (marca e mensagens)
+        run: |
+          if [ ! -f truehd-rotulos.patch ]; then
+            echo "FALTA truehd-rotulos.patch na raiz do repositorio"; exit 1
+          fi
+          patch -p1 --dry-run < truehd-rotulos.patch
+          patch -p1 < truehd-rotulos.patch
+
+      - name: Aplicar o TrueHD tolerante a erros de decodificacao
+        run: |
+          if [ ! -f truehd-tolerante.patch ]; then
+            echo "FALTA truehd-tolerante.patch na raiz do repositorio"; exit 1
+          fi
+          patch -p1 --dry-run < truehd-tolerante.patch
+          patch -p1 < truehd-tolerante.patch
 
       - name: Configuracao do servidor (local.properties)
         env:
