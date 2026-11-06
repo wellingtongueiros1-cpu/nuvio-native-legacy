@@ -1,0 +1,97 @@
+diff --git a/src/player.c b/src/player.c
+index 8a57996..5f6bbd6 100644
+--- a/src/player.c
++++ b/src/player.c
+@@ -596,6 +596,7 @@ static int ehCanal(void) { return canalSessao; }
+ static int marcaDtsAtual(void) {
+   int e = video_dts_estado();
+   if (e == VIDEO_DTS_NENHUM) return -1;
++  if (video_dts_truehd()) return FMT_TRUEHD;   // conversao de TrueHD: a marca e a do TrueHD, nao a do DTS
+   switch (video_faixa_dts(video_audio(video_audio_atual()))) {
+     case 3: return FMT_DTSX;
+     case 2: return FMT_DTSHD;
+@@ -3949,7 +3950,8 @@ static void avMontarOsd(AoVivoOsd *o) {
+     { const char *d = NULL;
+       switch (video_dts_estado()) {
+         case VIDEO_DTS_NATIVO:     d = "Áudio: DTS, decodificado pela TV"; break;
+-        case VIDEO_DTS_PREPARANDO: d = "Áudio: DTS, preparando a conversão"; break;
++        case VIDEO_DTS_PREPARANDO: d = video_dts_truehd() ? "Áudio: TrueHD, preparando a conversão"
++                                                          : "Áudio: DTS, preparando a conversão"; break;
+ #ifdef NV_TPK
+         case VIDEO_DTS_CONVERTIDO: d = ajustes_dts_ac3() ? "Áudio: DTS convertido para Dolby Digital nesta TV"
+                                                           : "Áudio: DTS convertido para AAC estéreo nesta TV"; break;
+@@ -3964,7 +3966,8 @@ static void avMontarOsd(AoVivoOsd *o) {
+                         : "Áudio: DTS convertido para AAC estéreo nesta TV");
+           break; }
+ #endif
+-        case VIDEO_DTS_FALHOU:     d = "Áudio: DTS, a conversão falhou (sem som)"; break;
++        case VIDEO_DTS_FALHOU:     d = video_dts_truehd() ? "Áudio: TrueHD, a conversão falhou (toca a outra faixa)"
++                                                          : "Áudio: DTS, a conversão falhou (sem som)"; break;
+         case VIDEO_DTS_SEM_SOM:    d = "Áudio: DTS, esta TV não toca (sem som)"; break;
+       }
+       if (d) snprintf(o->info[k++], sizeof o->info[0], "%s", i18n(d)); }
+@@ -6600,7 +6603,8 @@ void player_desenhar(Uint32 agora) {
+         pd.texto = e == VIDEO_DTS_NATIVO ? i18n("Áudio DTS nativo")
+                  : e == VIDEO_DTS_CONVERTIDO ? i18n(!strncmp(video_dts_saida(), "TrueHD", 6)
+                                                     ? "Áudio TrueHD convertido nesta TV" : "Áudio DTS convertido nesta TV")
+-                 : e == VIDEO_DTS_FALHOU ? i18n("Não deu para converter o áudio DTS")
++                 : e == VIDEO_DTS_FALHOU ? i18n(video_dts_truehd() ? "Não deu para converter o áudio TrueHD"
++                                                                    : "Não deu para converter o áudio DTS")
+                  : i18n("Esta TV não toca áudio DTS");
+         pd.semFim = 1; pd.aberta = 1;
+         plrilha_pedir(&pd);
+diff --git a/src/video.c b/src/video.c
+index 533f802..eafbbf6 100644
+--- a/src/video.c
++++ b/src/video.c
+@@ -135,6 +135,13 @@ int video_fonte_tocou(void) { return fonteTocou; }
+ static int dvLiberadoNestaTv(void);
+ static int dvPronto(void);
+ const char *video_dts_saida(void) { return dtsSaida; }
++// A conversao em curso (ou que falhou) e de uma faixa TrueHD/MLP, nao de DTS: a marca e os
++// textos do player dizem TrueHD. Zerado a cada fonte nova, junto com dtsEstado.
++static int dtsTh;
++int video_dts_truehd(void) {
++  return dtsTh && (dtsEstado == VIDEO_DTS_PREPARANDO || dtsEstado == VIDEO_DTS_CONVERTIDO ||
++                   dtsEstado == VIDEO_DTS_FALHOU);
++}
+ 
+ int video_faixa_dts(const VideoFaixa *f) {
+   char s[96];
+@@ -2359,7 +2366,7 @@ int  video_reconectando(void) {
+ 
+ int video_tocar(const char *url) {
+   dvRecuado = 0;
+-  dtsTentou = 0; dtsRevisao = 0; dtsSaida[0] = 0; dtsNativePending = 0; dtsEstado = 0;
++  dtsTentou = 0; dtsRevisao = 0; dtsSaida[0] = 0; dtsNativePending = 0; dtsEstado = 0; dtsTh = 0;
+   dtsHabilitado = dts_playback_enabled() && dtsLiberadoNestaTv();
+   printf("[dts] fallback %s\n", dtsHabilitado ? "available" : "unavailable");
+   dvSondado = dvMkvPerfil = dvAudios = mkvAudioFxN = 0; dtsModoDv = 0; dvAudioMkvOrd = -1; dvSegurar = 0;
+@@ -3101,6 +3108,7 @@ static int iniciarDts(int stream) {
+   if (video_legenda(legAtual)) dtsLegFaixa = *video_legenda(legAtual);
+   snprintf(dtsLegUrlAntes, sizeof dtsLegUrlAntes, "%s", legUrlAtual);
+   dtsTentou = 1;
++  dtsTh = a && video_faixa_truehd(a);
+   dvFonteAberta = 0;
+   pararSessao();
+   posSeg = alvo; pausaPedida = paused;
+@@ -3840,6 +3848,7 @@ void video_escolher_audio(int i) {
+       dts_playback_seek(dtsSessao, posSeg);
+       dts_playback_audio(dtsSessao, f->stream_index);
+       audioAtual = i;
++      dtsTh = !strcmp(f->codec, "truehd") || !strcmp(f->codec, "mlp");
+     } else {
+       VideoFaixa target = *f;
+       double alvo = posSeg;
+diff --git a/src/video.h b/src/video.h
+index cd92914..d7257b3 100644
+--- a/src/video.h
++++ b/src/video.h
+@@ -276,6 +276,7 @@ int  video_iniciando(void);
+ // 1 once the current source has played on webOS (kept across reloads of it).
+ int video_fonte_tocou(void);
+ const char *video_dts_saida(void);  // actual local conversion output, empty for native playback
++int  video_dts_truehd(void);       // 1 = a tentativa/sessao de conversao e de uma faixa TrueHD/MLP (nao de DTS)
+ int    video_audio_nao_suportado(void);  // uMS errorCode 200: video segue sem som
+ int    video_seek_desistiu(void);  // webOS: seek recusado 3x; segue tocando de onde esta
+ int    video_terminou(void); // 1 depois do fim de fluxo (endOfStream) da fonte atual
