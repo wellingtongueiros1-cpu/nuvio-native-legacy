@@ -1,0 +1,18 @@
+diff --git a/src/legendasui.c b/src/legendasui.c
+index 30a9953..383901e 100644
+--- a/src/legendasui.c
++++ b/src/legendasui.c
+@@ -46,7 +46,12 @@ void legendasui_id_embutida(const VideoFaixa *f, char out[24]) {
+   // The TV's track number: stable for one media session, unlike the list
+   // index (tracks can be re-listed after the MKV probe) and unlike the
+   // language (the LG reports "(null)" until the probe fills it).
+-  snprintf(n, sizeof n, "%d", f ? f->numero : -1);
++  // PGS/VobSub recovered from the MKV all carry numero -1 (the TV lists none of them):
++  // the file ordinal tells them apart. Without it two PGS tracks shared one identity,
++  // both showed as selected and choosing the second picked the first. numero >= 0
++  // keeps the old id.
++  if (f && f->numero < 0) snprintf(n, sizeof n, "%d.%d", f->numero, f->ordinalMkv);
++  else snprintf(n, sizeof n, "%d", f ? f->numero : -1);
+   hexId('e', fnv(14695981039346656037ULL, n), out);
+ }
+ void legendasui_id_addon(const Legenda *l, char out[24]) {
