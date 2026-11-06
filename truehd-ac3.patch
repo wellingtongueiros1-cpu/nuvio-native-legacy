@@ -1,0 +1,47 @@
+diff --git a/src/dts/dts_engine.c b/src/dts/dts_engine.c
+index 1b54cee..e156fe2 100644
+--- a/src/dts/dts_engine.c
++++ b/src/dts/dts_engine.c
+@@ -951,8 +951,9 @@ int dts_engine_open(DtsEngine *e,const char *url,const char *headers,int audio,i
+     e->dec->err_recognition=AV_EF_EXPLODE;
+     if(core && av_opt_set_int(e->dec->priv_data,"core_only",1,0)<0) return fail(e,"DTS core-only unavailable",0);
+   }
+-  /* AC3 5.1 only when asked and the build has the encoder; else stereo AAC. */
+-  const AVCodec *encoder=g_surround_ac3?avcodec_find_encoder(AV_CODEC_ID_AC3):NULL;
++  /* DTS: AC3 5.1 only when asked and the build has the encoder; else stereo AAC.
++   * TrueHD/MLP: AC3 5.1 whatever that setting says (stereo sources stay stereo). */
++  const AVCodec *encoder=(g_surround_ac3 || !is_dts)?avcodec_find_encoder(AV_CODEC_ID_AC3):NULL;   /* TrueHD/MLP always leave as Dolby Digital; AAC only if the build lacks the AC3 encoder */
+   int out_channels=2;
+   if(encoder) {
+     int in_channels=ap->ch_layout.nb_channels;
+diff --git a/src/player.c b/src/player.c
+index 7146bbd..8a57996 100644
+--- a/src/player.c
++++ b/src/player.c
+@@ -3954,7 +3954,15 @@ static void avMontarOsd(AoVivoOsd *o) {
+         case VIDEO_DTS_CONVERTIDO: d = ajustes_dts_ac3() ? "Áudio: DTS convertido para Dolby Digital nesta TV"
+                                                           : "Áudio: DTS convertido para AAC estéreo nesta TV"; break;
+ #else
+-        case VIDEO_DTS_CONVERTIDO: d = "Áudio: DTS convertido para AAC estéreo nesta TV"; break;
++        case VIDEO_DTS_CONVERTIDO: {
++          // O texto vem da saida REAL da conversao ("DTS → AC3 5.1", "TrueHD → AC3 5.1").
++          const char *sv = video_dts_saida();
++          int th = !strncmp(sv, "TrueHD", 6), ac3 = strstr(sv, "AC3") != NULL;
++          d = th ? (ac3 ? "Áudio: TrueHD convertido para Dolby Digital 5.1 nesta TV"
++                        : "Áudio: TrueHD convertido para AAC estéreo nesta TV")
++                 : (ac3 ? "Áudio: DTS convertido para Dolby Digital 5.1 nesta TV"
++                        : "Áudio: DTS convertido para AAC estéreo nesta TV");
++          break; }
+ #endif
+         case VIDEO_DTS_FALHOU:     d = "Áudio: DTS, a conversão falhou (sem som)"; break;
+         case VIDEO_DTS_SEM_SOM:    d = "Áudio: DTS, esta TV não toca (sem som)"; break;
+@@ -6590,7 +6598,8 @@ void player_desenhar(Uint32 agora) {
+         pd.icone = "dts";
+         pd.corIcone = e == VIDEO_DTS_FALHOU || e == VIDEO_DTS_SEM_SOM ? 1 : 0;
+         pd.texto = e == VIDEO_DTS_NATIVO ? i18n("Áudio DTS nativo")
+-                 : e == VIDEO_DTS_CONVERTIDO ? i18n("Áudio DTS convertido nesta TV")
++                 : e == VIDEO_DTS_CONVERTIDO ? i18n(!strncmp(video_dts_saida(), "TrueHD", 6)
++                                                    ? "Áudio TrueHD convertido nesta TV" : "Áudio DTS convertido nesta TV")
+                  : e == VIDEO_DTS_FALHOU ? i18n("Não deu para converter o áudio DTS")
+                  : i18n("Esta TV não toca áudio DTS");
+         pd.semFim = 1; pd.aberta = 1;
