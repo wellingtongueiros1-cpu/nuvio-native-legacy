@@ -1,0 +1,41 @@
+diff --git a/src/dts/dts_engine.c b/src/dts/dts_engine.c
+index e156fe2..4d86c25 100644
+--- a/src/dts/dts_engine.c
++++ b/src/dts/dts_engine.c
+@@ -1045,7 +1045,12 @@ static int resample(DtsEngine *e,AVFrame *f) {
+   int r;
+   if(f && (!e->swr || e->input_rate!=f->sample_rate || e->input_format!=f->format || av_channel_layout_compare(&e->input_layout,&f->ch_layout))) {
+     /* Layout changes midstream need a new playback session; no silent remapping. */
+-    if(e->swr) return fail(e,"DTS layout changed midstream",0);
++    if(e->swr) {
++      /* DTS: a layout change needs a new session. TrueHD/MLP can switch presentation
++       * (rate/format/layout) between substreams: rebuild the resampler and go on. */
++      if(e->dec->codec_id==AV_CODEC_ID_DTS) return fail(e,"DTS layout changed midstream",0);
++      swr_free(&e->swr);
++    }
+     e->input_rate=f->sample_rate; e->input_format=f->format;
+     av_channel_layout_copy(&e->input_layout,&f->ch_layout);
+     r=swr_alloc_set_opts2(&e->swr,&e->enc->ch_layout,e->enc->sample_fmt,48000,&f->ch_layout,f->format,f->sample_rate,0,NULL);
+@@ -1211,6 +1216,7 @@ static int next_frame(DtsEngine *e,DtsFrame *f) {
+       r=avcodec_receive_frame(e->dec,e->decoded);
+       if(r==0) { r=resample(e,e->decoded); av_frame_unref(e->decoded); if(r<0) return -1; continue; }
+       if(r==AVERROR_EOF) e->decoder_eof=1;
++      else if(r==AVERROR_INVALIDDATA && e->dec->codec_id!=AV_CODEC_ID_DTS) { /* TrueHD/MLP: skip a damaged or not-yet-synced unit, as players do */ }
+       else if(r!=AVERROR(EAGAIN)) return fail(e,"DTS decode",r);
+     }
+     if(e->decoder_eof && !e->resampler_eof) {
+@@ -1243,7 +1249,13 @@ static int next_frame(DtsEngine *e,DtsFrame *f) {
+             || sync==UINT32_C(0x1fffe800) || sync==UINT32_C(0xff1f00e8)) e->has_core=1;
+       }
+       r=avcodec_send_packet(e->dec,e->in);
+-      if(r<0) { av_packet_unref(e->in); return fail(e,"DTS decode input",r); }
++      if(r<0) {
++        av_packet_unref(e->in);
++        /* TrueHD/MLP only decodes from a major sync: the packets before the first one (stream
++         * start, after a seek) come back INVALIDDATA and must be skipped, not end the session. */
++        if(r==AVERROR_INVALIDDATA && e->dec->codec_id!=AV_CODEC_ID_DTS) continue;
++        return fail(e,"DTS decode input",r);
++      }
+     }
+     else if(e->in->stream_index==e->info.video_stream) {
+       if(!e->bsf) {
