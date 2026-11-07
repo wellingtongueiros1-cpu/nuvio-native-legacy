@@ -1,0 +1,35 @@
+diff --git a/tools/build-ass-arm.sh b/tools/build-ass-arm.sh
+index 3c2781e..7029168 100755
+--- a/tools/build-ass-arm.sh
++++ b/tools/build-ass-arm.sh
+@@ -29,12 +29,27 @@ if [ -z "$PKG_CONFIG" ] || [ ! -x "$PKG_CONFIG" ]; then
+ fi
+ export PKG_CONFIG
+ 
++# fetch URL ARQUIVO [URL_ALTERNATIVA...]: tenta cada URL, em tres rodadas, com espera entre
++# elas. O espelho do GNU as vezes nao responde de dentro do Docker do runner (curl 28).
+ fetch() {
+-  url=$1; out=$2
+-  [ -f "$BUILD/$out" ] || curl -fsSL "$url" -o "$BUILD/$out"
++  url=$1; out=$2; shift 2
++  if [ -f "$BUILD/$out" ]; then return 0; fi
++  round=1
++  while [ "$round" -le 3 ]; do
++    for u in "$url" "$@"; do
++      if curl -fsSL --connect-timeout 20 --max-time 300 "$u" -o "$BUILD/$out"; then return 0; fi
++      rm -f "$BUILD/$out"
++    done
++    echo "download de $out falhou (rodada $round de 3), aguardando..." >&2
++    sleep $((round * 10))
++    round=$((round + 1))
++  done
++  return 1
+ }
+ 
+-fetch "https://download-mirror.savannah.gnu.org/releases/freetype/freetype-${FREETYPE_VERSION}.tar.xz" freetype.tar.xz
++fetch "https://download-mirror.savannah.gnu.org/releases/freetype/freetype-${FREETYPE_VERSION}.tar.xz" freetype.tar.xz \
++  "https://download.savannah.gnu.org/releases/freetype/freetype-${FREETYPE_VERSION}.tar.xz" \
++  "https://downloads.sourceforge.net/project/freetype/freetype2/${FREETYPE_VERSION}/freetype-${FREETYPE_VERSION}.tar.xz"
+ tar -xf "$BUILD/freetype.tar.xz" -C "$BUILD"
+ cd "$BUILD/freetype-${FREETYPE_VERSION}"
+ ./configure --host="${CC%-gcc}" --prefix="$PREFIX" --enable-static --disable-shared --without-zlib --without-bzip2 --without-png --without-brotli --without-harfbuzz
