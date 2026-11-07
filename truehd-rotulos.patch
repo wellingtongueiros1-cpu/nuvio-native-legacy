@@ -41,24 +41,32 @@ index 8a57996..5f6bbd6 100644
          pd.semFim = 1; pd.aberta = 1;
          plrilha_pedir(&pd);
 diff --git a/src/video.c b/src/video.c
-index 533f802..eafbbf6 100644
+index 533f802..6a46815 100644
 --- a/src/video.c
 +++ b/src/video.c
-@@ -135,6 +135,13 @@ int video_fonte_tocou(void) { return fonteTocou; }
+@@ -135,6 +135,9 @@ int video_fonte_tocou(void) { return fonteTocou; }
  static int dvLiberadoNestaTv(void);
  static int dvPronto(void);
  const char *video_dts_saida(void) { return dtsSaida; }
 +// A conversao em curso (ou que falhou) e de uma faixa TrueHD/MLP, nao de DTS: a marca e os
 +// textos do player dizem TrueHD. Zerado a cada fonte nova, junto com dtsEstado.
 +static int dtsTh;
+ 
+ int video_faixa_dts(const VideoFaixa *f) {
+   char s[96];
+@@ -159,6 +162,11 @@ static int video_faixa_truehd(const VideoFaixa *f) {
+ // So o ramo webOS escreve aqui (PREPARANDO, CONVERTIDO, FALHOU): o resto sai
+ // da faixa e do pipeline, igual em todos os alvos. No Mac, video_simular.
+ static int dtsEstado;
++// dtsTh e dtsEstado ja existem aqui; ver o comentario de dtsTh acima.
 +int video_dts_truehd(void) {
 +  return dtsTh && (dtsEstado == VIDEO_DTS_PREPARANDO || dtsEstado == VIDEO_DTS_CONVERTIDO ||
 +                   dtsEstado == VIDEO_DTS_FALHOU);
 +}
- 
- int video_faixa_dts(const VideoFaixa *f) {
-   char s[96];
-@@ -2359,7 +2366,7 @@ int  video_reconectando(void) {
+ #ifdef NV_TPK
+ int video_tpk_dts_estado(void);   // video_tpk.c: enquanto o .tpk converte o DTS
+ #endif
+@@ -2359,7 +2367,7 @@ int  video_reconectando(void) {
  
  int video_tocar(const char *url) {
    dvRecuado = 0;
@@ -67,7 +75,7 @@ index 533f802..eafbbf6 100644
    dtsHabilitado = dts_playback_enabled() && dtsLiberadoNestaTv();
    printf("[dts] fallback %s\n", dtsHabilitado ? "available" : "unavailable");
    dvSondado = dvMkvPerfil = dvAudios = mkvAudioFxN = 0; dtsModoDv = 0; dvAudioMkvOrd = -1; dvSegurar = 0;
-@@ -3101,6 +3108,7 @@ static int iniciarDts(int stream) {
+@@ -3101,6 +3109,7 @@ static int iniciarDts(int stream) {
    if (video_legenda(legAtual)) dtsLegFaixa = *video_legenda(legAtual);
    snprintf(dtsLegUrlAntes, sizeof dtsLegUrlAntes, "%s", legUrlAtual);
    dtsTentou = 1;
@@ -75,7 +83,7 @@ index 533f802..eafbbf6 100644
    dvFonteAberta = 0;
    pararSessao();
    posSeg = alvo; pausaPedida = paused;
-@@ -3840,6 +3848,7 @@ void video_escolher_audio(int i) {
+@@ -3840,6 +3849,7 @@ void video_escolher_audio(int i) {
        dts_playback_seek(dtsSessao, posSeg);
        dts_playback_audio(dtsSessao, f->stream_index);
        audioAtual = i;
