@@ -5,8 +5,12 @@
 # RASCUNHO: montado a partir de tools/android.sh e tools/android/deps.sh, sem
 # ter sido executado. Se falhar, copie o final do log do passo que ficou vermelho.
 #
-# Antes: (1) capitulos-no-player.patch e capitulos-icone.patch na RAIZ do repo
-#            (o seu fork ja tem);
+# Antes: (1) na RAIZ do repo: capitulos-no-player.patch, capitulos-icone.patch,
+#            legenda-pgs.patch e elenco-botao.patch (os dois ultimos sao opcionais:
+#            sem eles o APK sai sem a correcao das legendas PGS e sem o botao Elenco).
+#            Os patches so da LG (truehd*, dts-direto, audio-detalhes, ass-download)
+#            podem ficar na raiz: este workflow NAO os aplica, porque o player do
+#            Android ja decodifica DTS e TrueHD sozinho;
 #        (2) secrets NUVIO_SUPABASE_URL, NUVIO_SUPABASE_ANON_KEY e
 #            TV_LOGIN_WEB_BASE_URL (os mesmos do workflow do .ipk);
 #        (3) para poder ATUALIZAR por cima do app instalado, crie os secrets da
@@ -43,11 +47,11 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      - name: Aplicar o menu de capitulos (se ainda nao estiver no codigo)
+      - name: Aplicar os patches (capitulos, legendas PGS e botao Elenco)
         run: |
-          for p in capitulos-no-player.patch capitulos-icone.patch; do
+          for p in capitulos-no-player.patch capitulos-icone.patch legenda-pgs.patch elenco-botao.patch; do
             if [ ! -f "$p" ]; then
-              echo "$p nao esta na raiz: assumindo que os capitulos ja estao no codigo."
+              echo "$p nao esta na raiz: pulando (assume que ja esta no codigo ou que voce nao quer)."
               continue
             fi
             if patch -p1 -R --dry-run < "$p" > /dev/null 2>&1; then
