@@ -1,0 +1,142 @@
+diff --git a/src/pausao.c b/src/pausao.c
+index 8e574dd..0d7a186 100644
+--- a/src/pausao.c
++++ b/src/pausao.c
+@@ -68,6 +68,8 @@
+ #define PAUSAO_COM_MS    6500u
+ #define PAUSAO_COM_FADE   350.0f
+ 
++static Uint32 forcarAte;       // botao "Elenco": ate quando o pedido de subir ja vale
++static int    porBotao;        // a ficha subiu pelo botao: fica mesmo com o ajuste desligado
+ static int    visivel;
+ static float  anim;            // 0..1, a entrada por mola
+ static Uint32 desdeQuando;     // quando a condicao passou a valer; 0 = nao vale
+@@ -85,7 +87,13 @@ void pausao_activity(void) {
+   desdeQuando = 0;
+ }
+ 
++void pausao_abrir_agora(void) {
++  forcarAte = SDL_GetTicks() + 2500u;
++}
++
+ void pausao_fechar(void) {
++  porBotao = 0;
++  forcarAte = 0;
+   visivel = 0;
+   anim = 0.0f;
+   desdeQuando = 0;
+@@ -122,16 +130,23 @@ void pausao_atualizar(float dt, Uint32 agora, int podeSubir, int idx,
+ 
+   // O ajuste e consultado AQUI e nao na abertura: desligar a opcao com o painel
+   // de pe tem de derrubar o painel, e nao valer so no filme seguinte.
+-  if (!podeSubir || !ajustes_pausa_overlay()) {
++  int forcado = forcarAte && agora < forcarAte;
++  if (!forcado) forcarAte = 0;
++  if (!podeSubir || (!ajustes_pausa_overlay() && !porBotao && !forcado)) {
+     // schedulePauseOverlay/syncPauseOverlayState (:7397): condicao que cai
+     // derruba o painel e ZERA o relogio. Rearmar de onde parou faria uma
+     // sequencia de pausas curtas somar quatro segundos e o painel subir sozinho
+     // no meio de uma cena.
+     visivel = 0;
+     desdeQuando = 0;
++    porBotao = 0;
+   } else {
+     if (!desdeQuando) desdeQuando = agora;
+-    if (!visivel && agora - desdeQuando >= PAUSAO_ESPERA_MS) {
++    if (forcado && !visivel) {
++      // Botao "Elenco": sobe agora. So valia depois de o player pausar (podeSubir).
++      visivel = 1; porBotao = 1; comT0 = agora; forcarAte = 0;
++      comProntos = pausacom_n() > 0;
++    } else if (!visivel && agora - desdeQuando >= PAUSAO_ESPERA_MS) {
+       visivel = 1; comT0 = agora;
+       // So entra no painel o que ja chegou: comentario tardio faria a ficha
+       // inteira subir 140 px no meio da leitura.
+@@ -158,8 +173,11 @@ int pausao_evento(const SDL_Event *e) {
+   if (k == SDLK_ESCAPE || k == SDLK_AC_BACK || k == SDLK_BACKSPACE ||
+       k == SDLK_DELETE) return PAUSAO_LIVRE;
+ 
++  // A tecla do botao que abriu a ficha pode repetir: so consome, nao fecha na cara.
++  if (e->key.repeat) return PAUSAO_CONSUMIU;
+   visivel = 0;
+   desdeQuando = 0;
++  porBotao = 0;
+ 
+   // playerScreen.js:22212 — OK/Play com o painel de pe derruba o painel E
+   // retoma. E o gesto obvio: quem esta olhando a ficha e aperta o centro quer
+@@ -315,7 +333,7 @@ static void pausao_desenharCorpo_(Uint32 agora, const PausaoCena *cena) {
+                            PAUSAO_LARG, PAUSAO_LD_SIN, 0.0f, PAUSAO_SIN_LINHAS);
+     alt += 16.0f + hSin;
+   }
+-  temCast = c->nElenco > 0 && ajustes_pausa_elenco();
++  temCast = c->nElenco > 0 && (ajustes_pausa_elenco() || porBotao);
+   nCom = comProntos ? pausacom_n() : 0;
+   if (nCom > 0) alt += 16.0f + PAUSAO_COM_H;
+   if (temCast) alt += 28.0f + 18.0f + 14.0f + PAUSAO_CARTA_H;
+diff --git a/src/pausao.h b/src/pausao.h
+index 2b6fbb5..d96b17b 100644
+--- a/src/pausao.h
++++ b/src/pausao.h
+@@ -111,6 +111,10 @@ float pausao_selo(float x, float y, int direita, float a);
+ // Fim da reproducao: zera o relogio e o painel. Sem isto o proximo filme
+ // abriria com o cronometro do anterior ja meio andado.
+ void pausao_fechar(void);
++// O botao "Elenco" do player: sobe a ficha JA, sem esperar os 4 s da pausa e mesmo com o
++// ajuste "Painel de pausa" desligado (nele o elenco tambem aparece, qualquer que seja o
++// ajuste do elenco). O player pausa antes; a ficha espera ate 2,5 s a pausa valer.
++void pausao_abrir_agora(void);
+ // O item que o painel desenharia agora, ja conferido pelo titulo (-1 = nenhum).
+ // Para teste (#190).
+ int  pausao_indice(void);
+diff --git a/src/player.c b/src/player.c
+index 57c32c7..1406ca4 100644
+--- a/src/player.c
++++ b/src/player.c
+@@ -235,7 +235,7 @@ extern int trakt_scrobble_alvo(int, const TraktScrobbleAlvo *, double, double,
+ // IDs estaveis: a ordem visual e de navegacao vem de transporteAcoes.
+ // Na serie, Anterior/Proximo ficam ao lado do Play; o restante conserva a ordem.
+ enum { PLR_PLAY, PLR_CC, PLR_AUDIO, PLR_ASPECTO,
+-       PLR_FONTES, PLR_EPISODIOS, PLR_PROXIMO, PLR_REINICIAR, PLR_NESTE, PLR_CAPITULOS, PLR_NBTNS };
++       PLR_FONTES, PLR_EPISODIOS, PLR_PROXIMO, PLR_REINICIAR, PLR_NESTE, PLR_CAPITULOS, PLR_ELENCO, PLR_NBTNS };
+ 
+ // Avanco em curso: enquanto vale, posSeg e do DONO e nao do pipeline.
+ static int    scrubbing, scrubPassos, scrubTocava, scrubDir, scrubToque;
+@@ -3440,6 +3440,9 @@ static int transporteAcoes(PlrAcao a[PLR_NBTNS]) {
+   a[n++] = (PlrAcao){PLR_AUDIO, 1};
+   a[n++] = (PlrAcao){PLR_ASPECTO, 1};
+   a[n++] = (PlrAcao){PLR_FONTES, 1};
++  // Elenco: abre a ficha de pausa (foto, nome e papel) na hora. So com elenco no titulo.
++  { const CatItem *ci = item();
++    if (!ehCanal() && ci && ci->nElenco > 0) a[n++] = (PlrAcao){PLR_ELENCO, 1}; }
+   if (temCapitulos()) a[n++] = (PlrAcao){PLR_CAPITULOS, 1};
+   if (temUltimoBotao()) a[n++] = (PlrAcao){PLR_EPISODIOS, 1};
+   if (serie) a[n++] = (PlrAcao){PLR_NESTE, 1};
+@@ -4313,6 +4316,10 @@ static int ativarBotao(int i, int repetiu) {
+     case PLR_FONTES: pedFontes = 1; break;
+     case PLR_NESTE: nesteAberto = 1; nesteT = epT; nesteE = epE; break;
+     case PLR_CAPITULOS: capsAbrir(); break;
++    case PLR_ELENCO:
++      if (tocando) alternarTocando();   // a ficha so sobe com o filme pausado
++      pausao_abrir_agora();
++      break;
+     case PLR_EPISODIOS:
+       if (ehCanal()) pedGuia = 1;
+       else if (epE > 0) episodios_abrir(idxAtual(), epT, epE);
+@@ -5463,8 +5470,9 @@ static const char *iconeBotao(int i) {
+     case PLR_FONTES:    return "pl_layers";
+     case PLR_PROXIMO:   return "pl_chevron-right";
+     case PLR_REINICIAR: return "pl_rotate-ccw";
+-    case PLR_NESTE:     return "pl_users";
++    case PLR_NESTE:     return "pl_clapperboard";   // convidados do episodio; "pl_users" e do Elenco
+     case PLR_CAPITULOS: return "pl_bookmark";
++    case PLR_ELENCO:    return "pl_users";
+     default:            return epE > 0 ? "pl_list-video" : "pl_film";
+   }
+ }
+@@ -5479,6 +5487,7 @@ static const char *rotuloBotao(int i) {
+     case PLR_REINICIAR: return "Assistir do começo";
+     case PLR_NESTE:     return "Neste episódio";
+     case PLR_CAPITULOS: return "Capítulos";
++    case PLR_ELENCO:    return "Elenco";
+     default:            return ehCanal() ? "Guia" : epE > 0 ? "Epis\xc3\xb3""dios" : "Relacionados";
+   }
+ }
