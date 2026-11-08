@@ -1,8 +1,8 @@
 # Compila o Nuvio Legacy (LG webOS) com o menu de capitulos e o TrueHD e entrega o .ipk
 # como "artifact" para baixar. Roda so quando voce manda (aba Actions > Run workflow).
 #
-# Antes: (1) subir capitulos-no-player.patch, capitulos-icone.patch, truehd.patch, dts-direto.patch, audio-detalhes.patch, legenda-pgs.patch, truehd-ac3.patch, truehd-rotulos.patch, truehd-tolerante.patch e ass-download.patch na RAIZ do repositorio;
-#        (1b) ordem de aplicacao: capitulos-no-player, capitulos-icone, truehd, dts-direto, audio-detalhes, legenda-pgs, truehd-ac3, truehd-rotulos, truehd-tolerante, ass-download;
+# Antes: (1) subir capitulos-no-player.patch, capitulos-icone.patch, truehd.patch, dts-direto.patch, audio-detalhes.patch, legenda-pgs.patch, truehd-ac3.patch, truehd-rotulos.patch, truehd-tolerante.patch, ass-download.patch e elenco-botao.patch na RAIZ do repositorio;
+#        (1b) ordem de aplicacao: capitulos-no-player, capitulos-icone, truehd, dts-direto, audio-detalhes, legenda-pgs, truehd-ac3, truehd-rotulos, truehd-tolerante, ass-download, elenco-botao;
 #        (2) criar os 3 secrets NUVIO_SUPABASE_URL, NUVIO_SUPABASE_ANON_KEY e
 #            TV_LOGIN_WEB_BASE_URL (Settings > Secrets and variables > Actions).
 name: Build IPK com capitulos
@@ -126,6 +126,14 @@ jobs:
           fi
           patch -p1 --dry-run < ass-download.patch
           patch -p1 < ass-download.patch
+
+      - name: Aplicar o botao Elenco e o painel ao pausar
+        run: |
+          if [ ! -f elenco-botao.patch ]; then
+            echo "FALTA elenco-botao.patch na raiz do repositorio"; exit 1
+          fi
+          patch -p1 --dry-run < elenco-botao.patch
+          patch -p1 < elenco-botao.patch
 
       - name: Configuracao do servidor (local.properties)
         env:
