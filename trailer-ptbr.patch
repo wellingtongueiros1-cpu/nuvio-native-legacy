@@ -100,14 +100,15 @@ index 292d016..b4f2b93 100644
  #endif
 diff --git a/src/ytdireto.c b/src/ytdireto.c
 new file mode 100644
-index 0000000..1359f31
+index 0000000..7631eb5
 --- /dev/null
 +++ b/src/ytdireto.c
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,401 @@
 +#include "ytdireto.h"
 +#include "rede.h"
 +#include "js.h"
 +#include "ajustes.h"
++#include "dados.h"
 +#include "perfiltv.h"
 +#include "tex_cache.h"
 +#include "memlog.h"
@@ -117,6 +118,7 @@ index 0000000..1359f31
 +#include <stdlib.h>
 +#include <string.h>
 +#include <time.h>
++#include <sys/stat.h>
 +
 +#define YT_MAX   12
 +#define DEF_MAX  4
@@ -129,7 +131,10 @@ index 0000000..1359f31
 +  char id[16];
 +  int  n, alt[DEF_MAX];          // MP4 com audio, do maior para o menor
 +  char url[DEF_MAX][URL_MAX];
-+  char hls[URL_MAX];             // lista HLS (plano B quando nao ha MP4)
++  char hls[URL_MAX];             // lista HLS inteira (ABR: comeca baixo; so plano B)
++  char toca[600];                // file:// da lista HLS reduzida a UMA variante H.264 (HD)
++  int  hlsAlt;                   // altura dessa variante
++  int  tocaQual;                 // teto dos Ajustes com que `toca` foi montada
 +  long expira;                   // epoch; 0 = nada util
 +  int  emVoo, respondeu;
 +} Entrada;
@@ -266,23 +271,113 @@ index 0000000..1359f31
 +  if (r) { free(r); return 1; }
 +  return 0;
 +}
-+static int hlsResponde(const char *url, const Cliente *c) {
++// O master HLS do YouTube. NULL se nao respondeu como lista (o texto cru e o que
++// reduzirMestre le).
++static char *baixarMestre(const char *url, const Cliente *c) {
 +  char h3[400];
 +  const char *cabs[2];
 +  char *r;
-+  int ok;
 +  snprintf(h3, sizeof h3, "User-Agent: %s", c->ua);
 +  cabs[0] = h3; cabs[1] = NULL;
 +  r = rede_baixar_com(url, 10, cabs);
-+  ok = r && !strncmp(r, "#EXTM3U", 7);
-+  free(r);
-+  return ok;
++  if (r && strncmp(r, "#EXTM3U", 7)) { free(r); r = NULL; }
++  return r;
++}
++
++// Valor de NOME=... numa linha de atributos HLS (com ou sem aspas).
++static int atributoHls(const char *linha, const char *nome, char *dst, unsigned tam) {
++  const char *p = linha;
++  size_t n = strlen(nome);
++  unsigned k = 0;
++  dst[0] = 0;
++  while ((p = strstr(p, nome))) {
++    if ((p == linha || p[-1] == ',' || p[-1] == ':') && p[n] == '=') {
++      p += n + 1;
++      if (*p == '"') { p++; while (*p && *p != '"' && k + 1 < tam) dst[k++] = *p++; }
++      else while (*p && *p != ',' && *p != '\r' && *p != '\n' && k + 1 < tam) dst[k++] = *p++;
++      dst[k] = 0;
++      return 1;
++    }
++    p += n;
++  }
++  return 0;
++}
++
++// UMA VARIANTE, NAO O ABR (a mesma razao de trailerapple.c, montarReduzido: entregue o
++// master inteiro, o player da LG comeca pela variante mais baixa e sobe aos poucos, e
++// cada troca muda o tamanho do quadro). Escolhe a maior largura H.264 (avc1) que cabe
++// no teto dos Ajustes — o YouTube so da avc1 ate 1080p — e grava um master com SO ela e
++// o grupo de audio dela, em <dados>/trailer/yt-<id>.m3u8. 1 e devolve `saida`
++// (file://...) e a altura; 0 se nada serviu.
++static int reduzirMestre(const char *id, const char *m, int teto, char *saida, unsigned tam, int *alt) {
++  char pasta[512], cam[640], linha[2048], melhorInf[2048] = "", melhorUri[1536] = "", melhorAud[128] = "";
++  const char *p = m;
++  int melhorW = 0, melhorH = 0;
++  FILE *g;
++  if (!dados_caminho(pasta, sizeof pasta, "trailer")) return 0;
++  mkdir(pasta, 0755);
++  snprintf(cam, sizeof cam, "%s/yt-%s.m3u8", pasta, id);
++  // Passo 1: a variante.
++  while (*p) {
++    size_t n = strcspn(p, "\n");
++    char res[32], cod[128], aud[128], uri[1536];
++    int w, h = 0;
++    const char *x;
++    if (n >= sizeof linha) n = sizeof linha - 1;
++    memcpy(linha, p, n); linha[n] = 0;
++    p += n; if (*p == '\n') p++;
++    if (strncmp(linha, "#EXT-X-STREAM-INF:", 18)) continue;
++    atributoHls(linha, "RESOLUTION", res, sizeof res);
++    atributoHls(linha, "CODECS", cod, sizeof cod);
++    atributoHls(linha, "AUDIO", aud, sizeof aud);
++    w = atoi(res);
++    x = strchr(res, 'x');
++    if (x) h = atoi(x + 1);
++    if (w <= 0 || h <= 0 || !strstr(cod, "avc1")) continue;
++    if (teto && w > (teto >= 1080 ? 1920 : teto >= 720 ? 1280 : 864)) continue;
++    // A linha seguinte e a URI da variante.
++    n = strcspn(p, "\n");
++    if (n >= sizeof uri) n = sizeof uri - 1;
++    memcpy(uri, p, n); uri[n] = 0;
++    uri[strcspn(uri, "\r")] = 0;
++    p += n; if (*p == '\n') p++;
++    if (strncmp(uri, "http", 4)) continue;
++    if (w > melhorW) {
++      melhorW = w; melhorH = h;
++      snprintf(melhorInf, sizeof melhorInf, "%s", linha);
++      snprintf(melhorUri, sizeof melhorUri, "%s", uri);
++      snprintf(melhorAud, sizeof melhorAud, "%s", aud);
++    }
++  }
++  if (!melhorW) return 0;
++  // Passo 2: o master reduzido, com o grupo de audio da variante (o primeiro dele).
++  g = fopen(cam, "w");
++  if (!g) return 0;
++  fprintf(g, "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n");
++  if (melhorAud[0]) {
++    p = m;
++    while (*p) {
++      size_t n = strcspn(p, "\n");
++      char grp[128];
++      if (n >= sizeof linha) n = sizeof linha - 1;
++      memcpy(linha, p, n); linha[n] = 0;
++      p += n; if (*p == '\n') p++;
++      if (strncmp(linha, "#EXT-X-MEDIA:", 13) || !strstr(linha, "TYPE=AUDIO")) continue;
++      atributoHls(linha, "GROUP-ID", grp, sizeof grp);
++      if (!strcmp(grp, melhorAud)) { fprintf(g, "%s\n", linha); break; }
++    }
++  }
++  fprintf(g, "%s\n%s\n", melhorInf, melhorUri);
++  fclose(g);
++  snprintf(saida, tam, "file://%s", cam);
++  *alt = melhorH;
++  return 1;
 +}
 +
 +static void *buscar(void *arg) {
 +  char id[16], motivo[200] = "";
 +  Entrada lida, *e;
-+  int k, achou = 0, barrado = 0;
++  int k, achou = 0, barrado = 0, teto = ajustes_trailer_qualidade();
 +  snprintf(id, sizeof id, "%s", (const char *)arg);
 +  free(arg);
 +  memset(&lida, 0, sizeof lida);
@@ -304,14 +399,24 @@ index 0000000..1359f31
 +          printf("[trailer] youtube %s: %s deu MP4 que nao responde\n", id, CLIENTES[k].nome);
 +          lida.n = 0;
 +        }
-+        if (!lida.n && lida.hls[0] && !hlsResponde(lida.hls, &CLIENTES[k])) {
-+          printf("[trailer] youtube %s: %s deu lista HLS que nao responde\n", id, CLIENTES[k].nome);
-+          lida.hls[0] = 0;
++        if (lida.hls[0]) {
++          // A lista HLS leva ao HD: o MP4 pronto do YouTube raramente passa de 360p.
++          char *mestre = baixarMestre(lida.hls, &CLIENTES[k]);
++          lida.toca[0] = 0; lida.hlsAlt = 0;
++          if (!mestre) {
++            printf("[trailer] youtube %s: %s deu lista HLS que nao responde\n", id, CLIENTES[k].nome);
++            lida.hls[0] = 0;
++          } else {
++            if (!reduzirMestre(id, mestre, teto, lida.toca, sizeof lida.toca, &lida.hlsAlt))
++              printf("[trailer] youtube %s: %s: lista HLS sem variante H.264 que caiba (teto %d)\n", id, CLIENTES[k].nome, teto);
++            free(mestre);
++          }
 +        }
++        lida.tocaQual = teto;
 +        if (lida.n || lida.hls[0]) {
 +          achou = 1;
-+          printf("[trailer] youtube %s: %s -> %s ate %dp\n", id, CLIENTES[k].nome,
-+                 lida.n ? "MP4" : "HLS", lida.n ? lida.alt[0] : 0);
++          printf("[trailer] youtube %s: %s -> MP4 ate %dp, HLS %s ate %dp (teto %d)\n", id, CLIENTES[k].nome,
++                 lida.n ? lida.alt[0] : 0, lida.toca[0] ? "reduzida" : lida.hls[0] ? "inteira" : "-", lida.hlsAlt, teto);
 +        }
 +      } else printf("[trailer] youtube %s: %s recusou (%s)\n", id, CLIENTES[k].nome, motivo);
 +      fflush(stdout);
@@ -330,6 +435,9 @@ index 0000000..1359f31
 +  memcpy(e->alt, lida.alt, sizeof e->alt);
 +  memcpy(e->url, lida.url, sizeof e->url);
 +  memcpy(e->hls, lida.hls, sizeof e->hls);
++  memcpy(e->toca, lida.toca, sizeof e->toca);
++  e->hlsAlt = lida.hlsAlt;
++  e->tocaQual = lida.tocaQual;
 +  if (achou) {
 +    long x = lida.n ? expiraDe(lida.url[0]) : expiraDe(lida.hls);
 +    e->expira = x > 0 ? x : (long)time(NULL) + 3 * 3600;
@@ -348,7 +456,10 @@ index 0000000..1359f31
 +  if (!idValido(id)) return;
 +  trancar();
 +  e = reservar(id);
-+  if (e->emVoo || valido(e)) { destrancar(); return; }
++  // Teto dos Ajustes mudou desde que a variante HLS foi escolhida: refaz uma vez.
++  if (e->emVoo || (valido(e) && (!e->hls[0] || e->tocaQual == ajustes_trailer_qualidade()))) {
++    destrancar(); return;
++  }
 +  e->emVoo = 1; e->respondeu = 0;
 +  destrancar();
 +  arg = strdup(id);
@@ -364,15 +475,20 @@ index 0000000..1359f31
 +  trancar();
 +  e = achar(id);
 +  if (e && valido(e)) {
++    int teto = ajustes_trailer_qualidade(), altMp4 = 0;
 +    if (e->n) {
 +      // O teto dos Ajustes, como o MP4 do IMDb (trailerimdb_url).
 +      long mem = 0;
 +      int k;
 +      tex_orcamento_info(NULL, &mem, NULL, NULL);
 +      k = (memlog_android_fraco() ? ptv_trailer_indice_duro : ptv_trailer_indice)(
-+          ptv_plataforma(), mem, ajustes_trailer_qualidade(), e->alt, e->n);
-+      if (k >= 0) r = e->url[k];
++          ptv_plataforma(), mem, teto, e->alt, e->n);
++      if (k >= 0) { r = e->url[k]; altMp4 = e->alt[k]; }
 +    }
++    // HD: a variante HLS (reduzida a uma) vence o MP4 quando e maior. Com o teto em 480p
++    // ou menos fica o MP4, o caminho mais simples, para quem a lista HLS nao tocar.
++    if (e->toca[0] && (!teto || teto >= 720) && e->hlsAlt > altMp4) r = e->toca;
++    if (!r && e->toca[0]) r = e->toca;
 +    if (!r && e->hls[0]) r = e->hls;
 +  }
 +  destrancar();
