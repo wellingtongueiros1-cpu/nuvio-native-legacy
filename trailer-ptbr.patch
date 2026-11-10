@@ -1,0 +1,424 @@
+diff --git a/src/ajustes.c b/src/ajustes.c
+index 63a9eff..1fdb42b 100644
+--- a/src/ajustes.c
++++ b/src/ajustes.c
+@@ -6740,8 +6740,9 @@ static int foraDestaPlataforma(int op) {
+   if (op >= AJ_MDB_TRAKT && op <= AJ_MDB_MAL) return 1;
+   // #509: um so interruptor de som; AJ_DET_TRAILER_SOM fica so para a migracao.
+   if (op == AJ_DET_TRAILER_SOM) return 1;
+-#ifndef __EMSCRIPTEN__
+-  // O trailer dublado e um id do YouTube: o player nativo nao toca.
++#if !defined(__EMSCRIPTEN__) && !defined(NV_WEBOS)
++  // O trailer dublado e um id do YouTube: o player nativo nao toca. Na LG ele toca:
++  // ytdireto.c transforma o id numa URL direta (MP4 ou HLS).
+   if (op == AJ_TRAILER_AUDIO) return 1;
+ #endif
+ #ifndef NV_TPK
+diff --git a/src/detail.c b/src/detail.c
+index 5c0c6c8..1b5e939 100644
+--- a/src/detail.c
++++ b/src/detail.c
+@@ -43,6 +43,7 @@ static TituloTempo detalheTempo;
+ #include "extras.h"
+ #include "trailer.h"
+ #include "trailerimdb.h"
++#include "ytdireto.h"
+ #include "trailerapple.h"
+ #include "trailerfonte.h"
+ #include "player.h"
+@@ -521,6 +522,23 @@ static const char *trailerFonte(int k, int *qual, int cheia) {
+   if (k >= 0 && k < extras_n_trailers() && extras_trailer_yt(k)[0]) c.youtube = extras_trailer_yt(k);
+   else if (extras_n_trailers() > 0 && extras_trailer_yt(0)[0]) { k = 0; c.youtube = extras_trailer_yt(0); }
+   c.youtubeIdiomaPreferido = extras_trailer_idioma_preferido(k);
++#elif defined(NV_WEBOS)
++  // LG: o trailer no idioma pedido (Ajustes > Trailers > Audio do trailer) e um video do
++  // YouTube. ytdireto.c o resolve em URL direta e o player da TV toca como o MP4 do IMDb.
++  // So pergunta ao YouTube quando o TMDB achou trailer NESSE idioma; ate ele responder, o
++  // ingles da Apple/IMDb espera (-1). Sem URL direta, a fila segue para a Apple e o IMDb.
++  {
++    int kk = (k >= 0 && k < extras_n_trailers() && extras_trailer_yt(k)[0]) ? k
++           : (extras_n_trailers() > 0 && extras_trailer_yt(0)[0]) ? 0 : -1;
++    int pref = extras_trailer_idioma_preferido(kk);
++    if (pref > 0 && kk >= 0) {
++      const char *ytId = extras_trailer_yt(kk);
++      ytdireto_pedir(ytId);
++      if (ytdireto_respondeu(ytId)) c.youtube = ytdireto_url(ytId);
++      else pref = -1;
++    }
++    c.youtubeIdiomaPreferido = pref;
++  }
+ #else
+   (void)k;
+ #endif
+diff --git a/src/home.c b/src/home.c
+index 61d12e3..06f68b6 100644
+--- a/src/home.c
++++ b/src/home.c
+@@ -97,6 +97,7 @@ int player_aberto(void);
+ #endif
+ int video_registro_negado(void); /* video.h: motivo do trailer bloqueado */
+ #include "trailerimdb.h"
++#include "ytdireto.h"
+ #include "trailerapple.h"
+ #include "trailerfonte.h"
+ #include "ponteiro.h"
+@@ -6337,6 +6338,22 @@ static void home_trailer_passo_(int topo, float dt, Uint32 agora) {
+     c.youtube = c.youtubeIdiomaPreferido > 0 ? heroTrailerYoutube(ci->imdb) : NULL;
+     if (heroTrailerFalhas & (1u << TRF_YOUTUBE)) { c.youtube = NULL; c.youtubeIdiomaPreferido = 0; }
+     c.youtubeRespondeu = 1;
++#elif defined(NV_WEBOS)
++    // LG: igual ao Samsung, mas o YouTube vira URL direta (ytdireto.c) para o player da TV.
++    // So abre o trailer no idioma pedido em "Audio do trailer"; ate o TMDB e o YouTube
++    // responderem (ou a janela vencer) o ingles da Apple/IMDb espera.
++    c.youtubeIdiomaPreferido = extras_hero_trailer_idioma_preferido(ci->imdb);
++    if (c.youtubeIdiomaPreferido > 0) {
++      char ytId[24];
++      if (extras_hero_trailer_obter(ci->imdb, ytId, sizeof ytId) && strlen(ytId) == 11) {
++        ytdireto_pedir(ytId);
++        if (ytdireto_respondeu(ytId)) c.youtube = ytdireto_url(ytId);
++        else c.youtubeIdiomaPreferido = -1;
++      } else c.youtubeIdiomaPreferido = 0;
++    }
++    if (c.youtubeIdiomaPreferido < 0 && venceu) c.youtubeIdiomaPreferido = 0;
++    if (heroTrailerFalhas & (1u << TRF_YOUTUBE)) { c.youtube = NULL; c.youtubeIdiomaPreferido = 0; }
++    c.youtubeRespondeu = 1;
+ #else
+     c.youtubeRespondeu = venceu;
+ #endif
+diff --git a/src/trailerfonte.c b/src/trailerfonte.c
+index 292d016..b4f2b93 100644
+--- a/src/trailerfonte.c
++++ b/src/trailerfonte.c
+@@ -28,6 +28,8 @@ static int existe(int fonte, int tizen) {
+     case TRF_YOUTUBE:
+ #if defined(NV_VIDAA) && !defined(NV_UM_FIO)
+       return 0;  // mt build: YouTube iframe falha com COEP isolado
++#elif defined(NV_WEBOS)
++      return 1;  // LG: sem iframe; ytdireto.c resolve o video em URL direta para o player da TV
+ #else
+       return tizen;  // Tizen e VIDAA st: YouTube habilitado
+ #endif
+diff --git a/src/ytdireto.c b/src/ytdireto.c
+new file mode 100644
+index 0000000..1359f31
+--- /dev/null
++++ b/src/ytdireto.c
+@@ -0,0 +1,285 @@
++#include "ytdireto.h"
++#include "rede.h"
++#include "js.h"
++#include "ajustes.h"
++#include "perfiltv.h"
++#include "tex_cache.h"
++#include "memlog.h"
++#include <SDL2/SDL.h>
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#define YT_MAX   12
++#define DEF_MAX  4
++#define URL_MAX  2304
++// A chave publica do cliente web do YouTube, a mesma que o Arc usa quando nao
++// consegue ler a da pagina (FALLBACK_API_KEY).
++#define YT_CHAVE "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
++
++typedef struct {
++  char id[16];
++  int  n, alt[DEF_MAX];          // MP4 com audio, do maior para o menor
++  char url[DEF_MAX][URL_MAX];
++  char hls[URL_MAX];             // lista HLS (plano B quando nao ha MP4)
++  long expira;                   // epoch; 0 = nada util
++  int  emVoo, respondeu;
++} Entrada;
++static Entrada tab[YT_MAX];
++static int nTab, prox;
++static SDL_mutex *mtx;
++static long pausaAte;            // 429: nao insiste ate esta hora
++
++static void trancar(void)   { if (!mtx) mtx = SDL_CreateMutex(); SDL_LockMutex(mtx); }
++static void destrancar(void){ SDL_UnlockMutex(mtx); }
++
++static Entrada *achar(const char *id) {
++  int i;
++  for (i = 0; i < nTab; i++) if (!strcmp(tab[i].id, id)) return &tab[i];
++  return NULL;
++}
++static Entrada *reservar(const char *id) {
++  Entrada *e = achar(id);
++  if (e) return e;
++  if (nTab < YT_MAX) e = &tab[nTab++];
++  else { e = &tab[prox]; prox = (prox + 1) % YT_MAX; }
++  memset(e, 0, sizeof *e);
++  snprintf(e->id, sizeof e->id, "%s", id);
++  return e;
++}
++
++static int idValido(const char *id) {
++  size_t i, n = id ? strlen(id) : 0;
++  if (n != 11) return 0;
++  for (i = 0; i < n; i++)
++    if (!((id[i] >= 'A' && id[i] <= 'Z') || (id[i] >= 'a' && id[i] <= 'z') ||
++          (id[i] >= '0' && id[i] <= '9') || id[i] == '_' || id[i] == '-')) return 0;
++  return 1;
++}
++
++// "expire=1790035589" na query ou "/expire/1790035589/" no caminho da lista HLS.
++static long expiraDe(const char *url) {
++  const char *p = strstr(url, "expire=");
++  if (p) return atol(p + 7);
++  p = strstr(url, "/expire/");
++  return p ? atol(p + 8) : 0;
++}
++
++// Cinco minutos de folga: a URL nao pode vencer no meio do trailer.
++static int valido(const Entrada *e) {
++  return e->respondeu && e->expira > (long)time(NULL) + 300;
++}
++
++typedef struct { const char *nome, *id, *versao, *ua, *ctx; } Cliente;
++// Os mesmos tres clientes e a mesma ordem do Arc (InAppYouTubeExtractor.kt, CLIENTS).
++static const Cliente CLIENTES[] = {
++  { "visionos", "101", "1.02",
++    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
++    "{\"clientName\":\"VISIONOS\",\"clientVersion\":\"1.02\",\"deviceMake\":\"Apple\",\"deviceModel\":\"RealityDevice17,1\","
++    "\"osName\":\"visionOS\",\"osVersion\":\"26.5.23O471\",\"hl\":\"en\",\"gl\":\"US\"}" },
++  { "android", "3", "20.10.35",
++    "com.google.android.youtube/20.10.35 (Linux; U; Android 14; en_US) gzip",
++    "{\"clientName\":\"ANDROID\",\"clientVersion\":\"20.10.35\",\"osName\":\"Android\",\"osVersion\":\"14\","
++    "\"platform\":\"MOBILE\",\"androidSdkVersion\":34,\"hl\":\"en\",\"gl\":\"US\"}" },
++  { "ios", "5", "20.10.1",
++    "com.google.ios.youtube/20.10.1 (iPhone16,2; U; CPU iOS 17_4 like Mac OS X)",
++    "{\"clientName\":\"IOS\",\"clientVersion\":\"20.10.1\",\"deviceModel\":\"iPhone16,2\",\"osName\":\"iPhone\","
++    "\"osVersion\":\"17.4.0.21E219\",\"platform\":\"MOBILE\",\"hl\":\"en\",\"gl\":\"US\"}" },
++};
++#define N_CLIENTES ((int)(sizeof CLIENTES / sizeof CLIENTES[0]))
++
++static char *perguntar(const char *id, const Cliente *c, int *status) {
++  char url[160], corpo[1200], h1[64], h2[64], h3[400];
++  const char *cabs[6];
++  snprintf(url, sizeof url, "https://www.youtube.com/youtubei/v1/player?key=" YT_CHAVE);
++  snprintf(corpo, sizeof corpo,
++    "{\"videoId\":\"%s\",\"contentCheckOk\":true,\"racyCheckOk\":true,"
++    "\"context\":{\"client\":%s},"
++    "\"playbackContext\":{\"contentPlaybackContext\":{\"html5Preference\":\"HTML5_PREF_WANTS\"}}}",
++    id, c->ctx);
++  snprintf(h1, sizeof h1, "X-YouTube-Client-Name: %s", c->id);
++  snprintf(h2, sizeof h2, "X-YouTube-Client-Version: %s", c->versao);
++  snprintf(h3, sizeof h3, "User-Agent: %s", c->ua);
++  cabs[0] = "Origin: https://www.youtube.com";
++  cabs[1] = h1; cabs[2] = h2; cabs[3] = h3;
++  cabs[4] = "Accept-Language: en-US,en;q=0.9";
++  cabs[5] = NULL;
++  *status = 0;
++  return rede_postar_st(url, 15, cabs, corpo, status);
++}
++
++// Le a resposta do player. 1 se achou o que tocar (MP4 e/ou lista HLS); senao
++// `motivo` diz por que, para o log (a diferenca entre "sem trailer" e "o YouTube
++// nos barrou" e o que decide o proximo passo).
++static int analisar(const char *corpo, Entrada *e, char *motivo, size_t mm) {
++  const char *fim = corpo + strlen(corpo), *p;
++  char st[32] = "", rz[160] = "";
++  e->n = 0; e->hls[0] = 0;
++  js_texto(corpo, fim, "status", st, sizeof st);
++  if (strcmp(st, "OK")) {
++    js_texto(corpo, fim, "reason", rz, sizeof rz);
++    snprintf(motivo, mm, "%s %s", st[0] ? st : "sem status", rz);
++    return 0;
++  }
++  // Arquivos com audio e video juntos. Os adaptativos (so video ou so audio)
++  // pediriam juntar os dois: nao entram. Formato com signatureCipher nao tem
++  // "url" e fica de fora (nao ha o que decifrar aqui).
++  for (p = js_array(corpo, fim, "formats"); p; p = js_prox(js_fim(p))) {
++    const char *pe = js_fim(p);
++    char mime[160] = "", u[URL_MAX];
++    int alt, i, j;
++    js_texto(p, pe, "mimeType", mime, sizeof mime);
++    if (!strstr(mime, "video/mp4") || !strstr(mime, "avc1")) continue;   // H.264: o que a TV toca
++    if (!js_texto(p, pe, "url", u, sizeof u)) continue;
++    // "n=" sem decifrar: o servidor limita a velocidade e o trailer engasga.
++    if (strstr(u, "&n=") || strstr(u, "?n=")) continue;
++    alt = (int)js_num(p, pe, "height", 0);
++    if (alt <= 0) continue;
++    for (i = 0; i < e->n && e->alt[i] > alt; i++) ;
++    if (i < e->n && e->alt[i] == alt) continue;
++    if (e->n >= DEF_MAX) { if (i >= DEF_MAX) continue; e->n = DEF_MAX - 1; }
++    for (j = e->n; j > i; j--) { e->alt[j] = e->alt[j - 1]; memcpy(e->url[j], e->url[j - 1], sizeof e->url[j]); }
++    e->alt[i] = alt;
++    snprintf(e->url[i], sizeof e->url[i], "%s", u);
++    e->n++;
++  }
++  js_texto(corpo, fim, "hlsManifestUrl", e->hls, sizeof e->hls);
++  if (!e->n && !e->hls[0]) { snprintf(motivo, mm, "OK, sem formato tocavel"); return 0; }
++  return 1;
++}
++
++// A URL responde de verdade? Um 403 aqui vira "sem YouTube" e o trailer cai no
++// ingles da Apple, em vez de abrir um player que nao toca (o Arc faz o mesmo:
++// isUrlReachable).
++static int mp4Responde(const char *url) {
++  long tam = 0;
++  int st = 0, erro = 0;
++  char *r = rede_baixar_trecho_st(url, 10, 0, 2047, &tam, &st, &erro, NULL, 0);
++  if (r) { free(r); return 1; }
++  return 0;
++}
++static int hlsResponde(const char *url, const Cliente *c) {
++  char h3[400];
++  const char *cabs[2];
++  char *r;
++  int ok;
++  snprintf(h3, sizeof h3, "User-Agent: %s", c->ua);
++  cabs[0] = h3; cabs[1] = NULL;
++  r = rede_baixar_com(url, 10, cabs);
++  ok = r && !strncmp(r, "#EXTM3U", 7);
++  free(r);
++  return ok;
++}
++
++static void *buscar(void *arg) {
++  char id[16], motivo[200] = "";
++  Entrada lida, *e;
++  int k, achou = 0, barrado = 0;
++  snprintf(id, sizeof id, "%s", (const char *)arg);
++  free(arg);
++  memset(&lida, 0, sizeof lida);
++  if ((long)time(NULL) < pausaAte) {
++    snprintf(motivo, sizeof motivo, "pausa por 429 (mais %lds)", pausaAte - (long)time(NULL));
++    barrado = 1;
++  } else {
++    for (k = 0; k < N_CLIENTES && !achou; k++) {
++      int status = 0;
++      char *corpo = perguntar(id, &CLIENTES[k], &status);
++      if (status == 429) {
++        pausaAte = (long)time(NULL) + 600;   // o YouTube pediu calma: dez minutos
++        snprintf(motivo, sizeof motivo, "429 em %s", CLIENTES[k].nome);
++        barrado = 1; free(corpo); break;
++      }
++      if (!corpo) { snprintf(motivo, sizeof motivo, "sem resposta de %s (HTTP %d)", CLIENTES[k].nome, status); continue; }
++      if (analisar(corpo, &lida, motivo, sizeof motivo)) {
++        if (lida.n && !mp4Responde(lida.url[0])) {
++          printf("[trailer] youtube %s: %s deu MP4 que nao responde\n", id, CLIENTES[k].nome);
++          lida.n = 0;
++        }
++        if (!lida.n && lida.hls[0] && !hlsResponde(lida.hls, &CLIENTES[k])) {
++          printf("[trailer] youtube %s: %s deu lista HLS que nao responde\n", id, CLIENTES[k].nome);
++          lida.hls[0] = 0;
++        }
++        if (lida.n || lida.hls[0]) {
++          achou = 1;
++          printf("[trailer] youtube %s: %s -> %s ate %dp\n", id, CLIENTES[k].nome,
++                 lida.n ? "MP4" : "HLS", lida.n ? lida.alt[0] : 0);
++        }
++      } else printf("[trailer] youtube %s: %s recusou (%s)\n", id, CLIENTES[k].nome, motivo);
++      fflush(stdout);
++      free(corpo);
++    }
++  }
++  if (!achou) {
++    printf("[trailer] youtube %s: sem URL direta (%s)\n", id, motivo[0] ? motivo : "sem motivo");
++    fflush(stdout);
++    memset(&lida, 0, sizeof lida);
++  }
++  trancar();
++  e = reservar(id);
++  e->emVoo = 0; e->respondeu = 1;
++  e->n = lida.n;
++  memcpy(e->alt, lida.alt, sizeof e->alt);
++  memcpy(e->url, lida.url, sizeof e->url);
++  memcpy(e->hls, lida.hls, sizeof e->hls);
++  if (achou) {
++    long x = lida.n ? expiraDe(lida.url[0]) : expiraDe(lida.hls);
++    e->expira = x > 0 ? x : (long)time(NULL) + 3 * 3600;
++  } else {
++    // Sem URL: tenta de novo em dez minutos (cinco de folga + cinco). Com o 429, so depois da pausa.
++    e->expira = (long)time(NULL) + 300 + (barrado ? 600 : 300);
++  }
++  destrancar();
++  return NULL;
++}
++
++void ytdireto_pedir(const char *id) {
++  Entrada *e;
++  pthread_t f;
++  char *arg;
++  if (!idValido(id)) return;
++  trancar();
++  e = reservar(id);
++  if (e->emVoo || valido(e)) { destrancar(); return; }
++  e->emVoo = 1; e->respondeu = 0;
++  destrancar();
++  arg = strdup(id);
++  if (!arg) return;
++  if (pthread_create(&f, NULL, buscar, arg) == 0) pthread_detach(f);
++  else { free(arg); trancar(); e->emVoo = 0; destrancar(); }
++}
++
++const char *ytdireto_url(const char *id) {
++  Entrada *e;
++  const char *r = NULL;
++  if (!idValido(id)) return NULL;
++  trancar();
++  e = achar(id);
++  if (e && valido(e)) {
++    if (e->n) {
++      // O teto dos Ajustes, como o MP4 do IMDb (trailerimdb_url).
++      long mem = 0;
++      int k;
++      tex_orcamento_info(NULL, &mem, NULL, NULL);
++      k = (memlog_android_fraco() ? ptv_trailer_indice_duro : ptv_trailer_indice)(
++          ptv_plataforma(), mem, ajustes_trailer_qualidade(), e->alt, e->n);
++      if (k >= 0) r = e->url[k];
++    }
++    if (!r && e->hls[0]) r = e->hls;
++  }
++  destrancar();
++  return r;
++}
++
++int ytdireto_respondeu(const char *id) {
++  Entrada *e;
++  int r;
++  if (!idValido(id)) return 1;
++  trancar();
++  e = achar(id);
++  r = !e || e->respondeu;
++  destrancar();
++  return r;
++}
+diff --git a/src/ytdireto.h b/src/ytdireto.h
+new file mode 100644
+index 0000000..f5084d8
+--- /dev/null
++++ b/src/ytdireto.h
+@@ -0,0 +1,27 @@
++// TRAILER DO YOUTUBE COMO URL DIRETA, para o player nativo da LG.
++//
++// Por que existe: o TMDB so tem o trailer em portugues como video do YouTube, e
++// o app nativo da LG nao tem player do YouTube (trailerfonte.c: YouTube so na
++// Samsung). O Nuvio Arc (Android TV) resolve isso com um extrator proprio
++// (InAppYouTubeExtractor.kt): pergunta ao endpoint interno youtubei/v1/player,
++// fingindo ser um cliente de VisionOS, Android ou iOS, e toca o que vier — um
++// MP4 com audio e video juntos ou a lista HLS. Este modulo faz o mesmo pedido a
++// partir da TV, que tem IP residencial (de datacenter o YouTube responde "Sign
++// in to confirm you're not a bot", como trailerimdb.h ja registrou).
++//
++// Sem decifrar assinatura nem PO token: so entram URLs que vem prontas na
++// resposta. Se o YouTube recusar (login, bot, 429), a fonte fica vazia e o
++// trailer cai na Apple e no IMDb, como antes.
++//
++// Fica em memoria por video (nao grava em disco: a URL vence em horas).
++#ifndef NV_YTDIRETO_H
++#define NV_YTDIRETO_H
++
++// Pede (em fio proprio) o video `id` do YouTube (11 caracteres). Idempotente.
++void        ytdireto_pedir(const char *id);
++// URL tocavel (MP4 ate o teto dos Ajustes, ou a lista HLS) ou NULL enquanto nao ha.
++const char *ytdireto_url(const char *id);
++// 1 quando a resposta ja veio (com ou sem URL): quem espera para de esperar.
++int         ytdireto_respondeu(const char *id);
++
++#endif
