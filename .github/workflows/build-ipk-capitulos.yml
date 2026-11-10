@@ -1,8 +1,8 @@
 # Compila o Nuvio Legacy (LG webOS) com o menu de capitulos e o TrueHD e entrega o .ipk
 # como "artifact" para baixar. Roda so quando voce manda (aba Actions > Run workflow).
 #
-# Antes: (1) subir capitulos-no-player.patch, capitulos-icone.patch, truehd.patch, dts-direto.patch, audio-detalhes.patch, legenda-pgs.patch, truehd-ac3.patch, truehd-rotulos.patch, truehd-tolerante.patch, ass-download.patch e elenco-botao.patch na RAIZ do repositorio;
-#        (1b) ordem de aplicacao: capitulos-no-player, capitulos-icone, truehd, dts-direto, audio-detalhes, legenda-pgs, truehd-ac3, truehd-rotulos, truehd-tolerante, ass-download, elenco-botao;
+# Antes: (1) subir capitulos-no-player.patch, capitulos-icone.patch, truehd.patch, dts-direto.patch, audio-detalhes.patch, legenda-pgs.patch, truehd-ac3.patch, truehd-rotulos.patch, truehd-tolerante.patch, ass-download.patch, elenco-botao.patch e trailer-ptbr.patch na RAIZ do repositorio;
+#        (1b) ordem de aplicacao: capitulos-no-player, capitulos-icone, truehd, dts-direto, audio-detalhes, legenda-pgs, truehd-ac3, truehd-rotulos, truehd-tolerante, ass-download, elenco-botao, trailer-ptbr;
 #        (2) criar os 3 secrets NUVIO_SUPABASE_URL, NUVIO_SUPABASE_ANON_KEY e
 #            TV_LOGIN_WEB_BASE_URL (Settings > Secrets and variables > Actions).
 name: Build IPK com capitulos
@@ -134,6 +134,14 @@ jobs:
           fi
           patch -p1 --dry-run < elenco-botao.patch
           patch -p1 < elenco-botao.patch
+
+      - name: Aplicar o trailer em portugues (YouTube direto)
+        run: |
+          if [ ! -f trailer-ptbr.patch ]; then
+            echo "FALTA trailer-ptbr.patch na raiz do repositorio"; exit 1
+          fi
+          patch -p1 --dry-run < trailer-ptbr.patch
+          patch -p1 < trailer-ptbr.patch
 
       - name: Configuracao do servidor (local.properties)
         env:
